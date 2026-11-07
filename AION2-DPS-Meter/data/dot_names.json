@@ -1,0 +1,9 @@
+{
+  "_comment": "DOT 分支專用名稱覆蓋 — 僅 is_dot=True 時按 CCSS 覆蓋顯示名。本體(is_dot=False)不受影響，因此不會蓋掉與 DOT 共用同碼的本體命中(如 15390000/15390050)。按 CCSS 命名故一次涵蓋該技能全部強化階段(offset 0/10/20/30/40/50)。",
+  "_format": "key = 4 位 CCSS, value = { name, name_en, [class] }",
+  "_updated": "2026-07-08",
+  "skills": {
+    "1539": { "name": "殘火", "name_en": "Ember", "class": "魔道星" },
+    "1520": { "name": "凍傷", "name_en": "Frostbite", "class": "魔道星" }
+  }
+}

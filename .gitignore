@@ -1,0 +1,35 @@
+# Binaries & Compressed Archives
+*.exe
+*.zip
+*.rar
+*.7z
+*.tar.gz
+
+# Python Cache & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env/
+env/
+
+# PyInstaller Build Output
+build/
+dist/
+*.spec.bak
+
+# Network Captures & Logs
+*.pcapng
+*.pcap
+*.log
+meter_debug.log
+
+# User Runtime Config (Preserve local player & party data)
+config.json
+
+# Operating System & IDE Files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store

@@ -1,0 +1,1065 @@
+{
+  "_comment": "特殊技能白名單 — 需完整 8 位碼識別的技能（CCSS 無法區分）",
+  "_format": "key = 完整 8 位技能碼, value = { name, name_en, type, [class], [ccss] }",
+  "_types": "summon = 召喚物技能（Layer 3 過濾豁免）, godstone = 神石, buff_share = buff 共享技能（隊友亦造成此傷害，同 CCSS 的本體技能另有其名）",
+  "_usage": "get_skill_name() 8 位碼優先查詢 + is_special_skill() 過濾豁免",
+  "_updated": "2026-07-29",
+  "skills": {
+    "11300037": {
+      "name": "強制落下",
+      "name_en": "Forced Fall",
+      "ccss": 1130,
+      "type": "summon",
+      "class": "劍星"
+    },
+    "13720005": {
+      "name": "分身攻擊",
+      "name_en": "Doppelganger Attack",
+      "type": "summon",
+      "class": "殺星"
+    },
+    "13730007": {
+      "name": "中毒",
+      "name_en": "Poison",
+      "type": "summon",
+      "class": "殺星"
+    },
+    "14060038": {
+      "name": "紅焰",
+      "name_en": "Crimson Flames",
+      "ccss": 1406,
+      "type": "summon",
+      "class": "弓星"
+    },
+    "15300001": {
+      "name": "地獄",
+      "name_en": "The Depths",
+      "ccss": 1530,
+      "type": "summon",
+      "class": "魔道星"
+    },
+    "15300011": {
+      "name": "地獄",
+      "name_en": "The Depths",
+      "ccss": 1530,
+      "type": "summon",
+      "class": "魔道星"
+    },
+    "15300021": {
+      "name": "地獄",
+      "name_en": "The Depths",
+      "ccss": 1530,
+      "type": "summon",
+      "class": "魔道星"
+    },
+    "15300031": {
+      "name": "地獄",
+      "name_en": "The Depths",
+      "ccss": 1530,
+      "type": "summon",
+      "class": "魔道星"
+    },
+    "15300041": {
+      "name": "地獄",
+      "name_en": "The Depths",
+      "ccss": 1530,
+      "type": "summon",
+      "class": "魔道星"
+    },
+    "100011": {
+      "name": "火之精靈：基本攻擊",
+      "name_en": "Fire Spirit: Basic Attack",
+      "ccss": 1610,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "100015": {
+      "name": "火之精靈：基本攻擊",
+      "name_en": "Fire Spirit: Basic Attack",
+      "ccss": 1610,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "100021": {
+      "name": "水之精靈：基本攻擊",
+      "name_en": "Water Spirit: Basic Attack",
+      "ccss": 1611,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "100025": {
+      "name": "水之精靈：基本攻擊",
+      "name_en": "Water Spirit: Basic Attack",
+      "ccss": 1611,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "100031": {
+      "name": "風之精靈：基本攻擊",
+      "name_en": "Wind Spirit: Basic Attack",
+      "ccss": 1612,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "100035": {
+      "name": "風之精靈：基本攻擊",
+      "name_en": "Wind Spirit: Basic Attack",
+      "ccss": 1612,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "100041": {
+      "name": "地之精靈：基本攻擊",
+      "name_en": "Earth Spirit: Basic Attack",
+      "ccss": 1613,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "100045": {
+      "name": "地之精靈：基本攻擊",
+      "name_en": "Earth Spirit: Basic Attack",
+      "ccss": 1613,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "100051": {
+      "name": "古代精靈：基本攻擊",
+      "name_en": "Ancient Spirit: Basic Attack",
+      "ccss": 1625,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "100055": {
+      "name": "古代精靈：基本攻擊",
+      "name_en": "Ancient Spirit: Basic Attack",
+      "ccss": 1625,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16001101": {
+      "name": "火之精靈：火焰爆炸",
+      "name_en": "Fire Spirit: Flame Explosion",
+      "ccss": 1610,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16001105": {
+      "name": "水之精靈：水炸彈",
+      "name_en": "Water Spirit: Water Bomb",
+      "ccss": 1611,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16001109": {
+      "name": "風之精靈：旋風",
+      "name_en": "Wind Spirit: Malicious Whirlwind",
+      "ccss": 1612,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16001113": {
+      "name": "地之精靈：頭擊",
+      "name_en": "Earth Spirit: Headbutt",
+      "ccss": 1613,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16001117": {
+      "name": "古代精靈：破壞",
+      "name_en": "Ancient Spirit: Destruction",
+      "ccss": 1625,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16001301": {
+      "name": "火之精靈：召喚隕石",
+      "name_en": "Fire Spirit: Summon Meteor",
+      "ccss": 1610,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16001305": {
+      "name": "水之精靈：冰河叉",
+      "name_en": "Water Spirit: Glacier Harpoon",
+      "ccss": 1611,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16001309": {
+      "name": "風之精靈：暴風",
+      "name_en": "Wind Spirit: Storm",
+      "ccss": 1612,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16001313": {
+      "name": "地之精靈：巨大枝幹",
+      "name_en": "Earth Spirit: Colossal Stalk",
+      "ccss": 1613,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16001317": {
+      "name": "古代精靈：磁暴",
+      "name_en": "Ancient Spirit: Magnetic Storm",
+      "ccss": 1625,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16100001": {
+      "name": "火之精靈：跳躍鑿擊",
+      "name_en": "Fire Spirit: Leaping Slam",
+      "ccss": 1610,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16110001": {
+      "name": "水之精靈：散發冷氣",
+      "name_en": "Water Spirit: Discharge Chill",
+      "ccss": 1611,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16110005": {
+      "name": "水之精靈：強化散發冷氣",
+      "name_en": "Water Spirit: Enhanced Discharge Chill",
+      "ccss": 1611,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16120001": {
+      "name": "風之精靈：落下之風",
+      "name_en": "Wind Spirit: Falling Wind",
+      "ccss": 1612,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16120005": {
+      "name": "風之精靈：強化落下之風",
+      "name_en": "Wind Spirit: Enhanced Falling Wind",
+      "ccss": 1612,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16130001": {
+      "name": "地之精靈：身體撞擊",
+      "name_en": "Earth Spirit: Tackle",
+      "ccss": 1613,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16130005": {
+      "name": "地之精靈：強化身體撞擊",
+      "name_en": "Earth Spirit: Enhanced Tackle",
+      "ccss": 1613,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16151100": {
+      "name": "火之精靈：激怒爆炸",
+      "name_en": "Fire Spirit: Rage Burst",
+      "ccss": 1610,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16152100": {
+      "name": "水之精靈：冰凍鎖鏈",
+      "name_en": "Water Spirit: Ice Chain",
+      "ccss": 1611,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16153100": {
+      "name": "地之精靈：挑釁",
+      "name_en": "Earth Spirit: Taunt",
+      "ccss": 1613,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16154100": {
+      "name": "風之精靈：急風",
+      "name_en": "Wind Spirit: Gale",
+      "ccss": 1612,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16155100": {
+      "name": "古代精靈：碎擊",
+      "name_en": "Ancient Spirit: Break",
+      "ccss": 1625,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "16250001": {
+      "name": "古代精靈：靈子砲",
+      "name_en": "Ancient Spirit: Plasma Cannon",
+      "ccss": 1625,
+      "type": "summon",
+      "class": "精靈星"
+    },
+    "17040257": {
+      "name": "天罰",
+      "name_en": "Divine Punishment",
+      "ccss": 1705,
+      "type": "summon",
+      "class": "治癒星"
+    },
+    "17400058": {
+      "name": "大地祝福",
+      "name_en": "Earth's Blessing",
+      "ccss": 1740,
+      "type": "buff_share",
+      "class": "治癒星"
+    },
+    "30000071": {
+      "name": "神石：凱西內爾的片段",
+      "name_en": "Godstone: Kaisinel's Vestige",
+      "type": "godstone"
+    },
+    "30000091": {
+      "name": "神石：佩里翁的悲劇",
+      "name_en": "Godstone: Perion's Tragedy",
+      "type": "godstone"
+    },
+    "30000101": {
+      "name": "神石：希爾拉德的鎖鏈",
+      "name_en": "Godstone: Heladrir's Chains",
+      "type": "godstone"
+    },
+    "30000111": {
+      "name": "神石：烏拉克的咆哮",
+      "name_en": "Godstone: Aulak's Roar",
+      "type": "godstone"
+    },
+    "30000121": {
+      "name": "神石：努亞的謀略",
+      "name_en": "Godstone: Nua's Scheme",
+      "type": "godstone"
+    },
+    "30000131": {
+      "name": "神石：雷伊達的執著",
+      "name_en": "Godstone: Reda's Tenacity",
+      "type": "godstone"
+    },
+    "30000141": {
+      "name": "神石：諾頓的技巧",
+      "name_en": "Godstone: Notun's Craft",
+      "type": "godstone"
+    },
+    "30000151": {
+      "name": "神石：山特拉斯的祕密",
+      "name_en": "Godstone: Santras's Secret",
+      "type": "godstone"
+    },
+    "30000161": {
+      "name": "神石：佩爾克的本能",
+      "name_en": "Godstone: Feruk's Instinct",
+      "type": "godstone"
+    },
+    "30000171": {
+      "name": "神石：吉凱爾的片段",
+      "name_en": "Godstone: Zikel's Vestige",
+      "type": "godstone"
+    },
+    "30000181": {
+      "name": "神石：塔辛的命令",
+      "name_en": "Godstone: Tassin's Command",
+      "type": "godstone"
+    },
+    "30000191": {
+      "name": "神石：鄔爾古倫的意志",
+      "name_en": "Godstone: Ulgorn's Will",
+      "type": "godstone"
+    },
+    "30000201": {
+      "name": "神石：奧特羅斯的約定",
+      "name_en": "Godstone: Aultross's Promise",
+      "type": "godstone"
+    },
+    "30000211": {
+      "name": "神石：巴考特的火種",
+      "name_en": "Godstone: Bargott's Ember",
+      "type": "godstone"
+    },
+    "30000221": {
+      "name": "神石：阿爾拉弗里的咒術",
+      "name_en": "Godstone: Aulvicar's Sorcery",
+      "type": "godstone"
+    },
+    "30000231": {
+      "name": "神石：卡爾吐亞的力量",
+      "name_en": "Godstone: Gartua's Strength",
+      "type": "godstone"
+    },
+    "30000241": {
+      "name": "神石：萊特曼的野心",
+      "name_en": "Godstone: Rathman's Greed",
+      "type": "godstone"
+    },
+    "30000251": {
+      "name": "神石：卡羅蜜溫的穩定",
+      "name_en": "Godstone: Karemiwen's Stability",
+      "type": "godstone"
+    },
+    "30000271": {
+      "name": "神石：艾多林的祈禱",
+      "name_en": "Godstone: Edorin's Prayer",
+      "type": "godstone"
+    },
+    "30000281": {
+      "name": "神石：佩雷格蘭的微笑",
+      "name_en": "Godstone: Peregrine's Smile",
+      "type": "godstone"
+    },
+    "30000291": {
+      "name": "神石：卡倫的加護",
+      "name_en": "Godstone: Karun's Benediction",
+      "type": "godstone"
+    },
+    "30000301": {
+      "name": "神石：卡羅蜜溫的護衛",
+      "name_en": "Godstone: Karemiwen's Escort",
+      "type": "godstone"
+    },
+    "30000311": {
+      "name": "神石：麻松的信賴",
+      "name_en": "Godstone: Mazion's Trust",
+      "type": "godstone"
+    },
+    "30000321": {
+      "name": "神石：艾多林的喊聲",
+      "name_en": "Godstone: Edorin's Battle Cry",
+      "type": "godstone"
+    },
+    "30000331": {
+      "name": "神石：默尼的挑戰",
+      "name_en": "Godstone: Munin's Challenge",
+      "type": "godstone"
+    },
+    "30000341": {
+      "name": "神石：麻松的熱情",
+      "name_en": "Godstone: Mazion's Passion",
+      "type": "godstone"
+    },
+    "30000351": {
+      "name": "神石：艾多林的理解",
+      "name_en": "Godstone: Edorin's Understanding",
+      "type": "godstone"
+    },
+    "30000361": {
+      "name": "神石：佩雷格蘭的強擊",
+      "name_en": "Godstone: Peregrine's Smite",
+      "type": "godstone"
+    },
+    "30000371": {
+      "name": "神石：基強的詭計",
+      "name_en": "Godstone: Kijan's Deceit",
+      "type": "godstone"
+    },
+    "30001071": {
+      "name": "神石：拉斯貝爾格的悲劇",
+      "name_en": "Godstone: Bollvig's Tragedy",
+      "type": "godstone"
+    },
+    "30001091": {
+      "name": "神石：司魯德蓋彌爾的靜默",
+      "name_en": "Godstone: Khrudgelmir's Silence",
+      "type": "godstone"
+    },
+    "30001101": {
+      "name": "神石：海格黛的束縛",
+      "name_en": "Godstone: Charna's Root",
+      "type": "godstone"
+    },
+    "30001111": {
+      "name": "神石：帕西美達斯的威嚴",
+      "name_en": "Godstone: Fasimedes's Dignity",
+      "type": "godstone"
+    },
+    "30001121": {
+      "name": "神石：畢達爾的尊嚴",
+      "name_en": "Godstone: Vidar's Dignity",
+      "type": "godstone"
+    },
+    "30001131": {
+      "name": "神石：泰爾拉斯的忠誠",
+      "name_en": "Godstone: Deltras's Loyalty",
+      "type": "godstone"
+    },
+    "30001141": {
+      "name": "神石：伊奧的悲傷",
+      "name_en": "Godstone: Io's Sadness",
+      "type": "godstone"
+    },
+    "30001151": {
+      "name": "神石：奧理薩的血",
+      "name_en": "Godstone: Orissan's Blood",
+      "type": "godstone"
+    },
+    "30001161": {
+      "name": "神石：瑪希薩的憤怒",
+      "name_en": "Godstone: Mahisha's Wrath",
+      "type": "godstone"
+    },
+    "30001171": {
+      "name": "神石：喬伏尼的勇氣",
+      "name_en": "Godstone: Traufnir's Courage",
+      "type": "godstone"
+    },
+    "30001181": {
+      "name": "神石：希芙的知識",
+      "name_en": "Godstone: Sif's Knowledge",
+      "type": "godstone"
+    },
+    "30001191": {
+      "name": "神石：普萊爾的智慧",
+      "name_en": "Godstone: Freyr's Wisdom",
+      "type": "godstone"
+    },
+    "30001201": {
+      "name": "神石：希琴的英明",
+      "name_en": "Godstone: Sigyn's Brilliance",
+      "type": "godstone"
+    },
+    "30001211": {
+      "name": "神石：布雷亞斯的激勵",
+      "name_en": "Godstone: Boreas's Encouragement",
+      "type": "godstone"
+    },
+    "30001221": {
+      "name": "神石：海格黛的聰明",
+      "name_en": "Godstone: Charna's Acumen",
+      "type": "godstone"
+    },
+    "30001231": {
+      "name": "神石：崔希梅塔斯的賢明",
+      "name_en": "Godstone: Thrasymedes's Wisdom",
+      "type": "godstone"
+    },
+    "30001241": {
+      "name": "神石：尤班特斯的敏捷",
+      "name_en": "Godstone: Jumentis's Dexterity",
+      "type": "godstone"
+    },
+    "30001271": {
+      "name": "神石：崔希梅塔斯的妥協",
+      "name_en": "Godstone: Thrasymedes's Compromise",
+      "type": "godstone"
+    },
+    "30001281": {
+      "name": "神石：布雷亞斯的信念",
+      "name_en": "Godstone: Boreas's Conviction",
+      "type": "godstone"
+    },
+    "30001291": {
+      "name": "神石：尤班特斯的默哀",
+      "name_en": "Godstone: Jumentis's Meditation",
+      "type": "godstone"
+    },
+    "30001301": {
+      "name": "神石：海格黛的獻身",
+      "name_en": "Godstone: Charna's Devotion",
+      "type": "godstone"
+    },
+    "30001311": {
+      "name": "神石：安特利夏的光榮",
+      "name_en": "Godstone: Ahserion's Glory",
+      "type": "godstone"
+    },
+    "30001321": {
+      "name": "神石：畢達爾的意識",
+      "name_en": "Godstone: Vidar's Ritual",
+      "type": "godstone"
+    },
+    "30001331": {
+      "name": "神石：伊奧的痛苦",
+      "name_en": "Godstone: Io's Pain",
+      "type": "godstone"
+    },
+    "30001341": {
+      "name": "神石：普萊爾的絕望",
+      "name_en": "Godstone: Freyr's Despair",
+      "type": "godstone"
+    },
+    "30001351": {
+      "name": "神石：司魯德蓋彌爾的刺激",
+      "name_en": "Godstone: Khrudgelmir's Stimulation",
+      "type": "godstone"
+    },
+    "30001361": {
+      "name": "神石：奧理薩的出征",
+      "name_en": "Godstone: Orissan's Campaign",
+      "type": "godstone"
+    },
+    "30001371": {
+      "name": "神石：希芙的狡猾",
+      "name_en": "Godstone: Sif's Guile",
+      "type": "godstone"
+    },
+    "30002071": {
+      "name": "神石：普雷奇翁的計謀",
+      "name_en": "Godstone: Fregion's Schemes",
+      "type": "godstone"
+    },
+    "30002091": {
+      "name": "神石：布里特拉的陰謀",
+      "name_en": "Godstone: Beritra's Conspiracy",
+      "type": "godstone"
+    },
+    "30002101": {
+      "name": "神石：奈薩肯的進軍",
+      "name_en": "Godstone: Nezekan's March",
+      "type": "godstone"
+    },
+    "30002111": {
+      "name": "神石：梅斯蘭泰達的野心",
+      "name_en": "Godstone: Meslamtaeda's Greed",
+      "type": "godstone"
+    },
+    "30002121": {
+      "name": "神石：艾萊修奇卡的名譽",
+      "name_en": "Godstone: Ereshkigal's Honor",
+      "type": "godstone"
+    },
+    "30002131": {
+      "name": "神石：凱西內爾的幻象",
+      "name_en": "Godstone: Kaisinel's Reverie",
+      "type": "godstone"
+    },
+    "30002141": {
+      "name": "神石：露梅爾的干涉",
+      "name_en": "Godstone: Lumiel's Interference",
+      "type": "godstone"
+    },
+    "30002151": {
+      "name": "神石：吉凱爾的傲慢",
+      "name_en": "Godstone: Zikel's Arrogance",
+      "type": "godstone"
+    },
+    "30002161": {
+      "name": "神石：普雷奇翁的策略",
+      "name_en": "Godstone: Fregion's Strategy",
+      "type": "godstone"
+    },
+    "30002171": {
+      "name": "神石：提亞馬特的激憤",
+      "name_en": "Godstone: Tiamat's Rage",
+      "type": "godstone"
+    },
+    "30002181": {
+      "name": "神石：崔妮爾的理性",
+      "name_en": "Godstone: Triniel's Rationality",
+      "type": "godstone"
+    },
+    "30002191": {
+      "name": "神石：白傑爾的盟誓",
+      "name_en": "Godstone: Vaizel's Oath",
+      "type": "godstone"
+    },
+    "30002201": {
+      "name": "神石：梅斯蘭泰達的懊悔",
+      "name_en": "Godstone: Meslamtaeda's Regret",
+      "type": "godstone"
+    },
+    "30002211": {
+      "name": "神石：提亞馬特的反擊",
+      "name_en": "Godstone: Tiamat's Counterstrike",
+      "type": "godstone"
+    },
+    "30002221": {
+      "name": "神石：瑪爾庫坦的公正",
+      "name_en": "Godstone: Marchutan's Justice",
+      "type": "godstone"
+    },
+    "30002231": {
+      "name": "神石：尤斯迪埃的溫情",
+      "name_en": "Godstone: Yustiel's Compassion",
+      "type": "godstone"
+    },
+    "30002241": {
+      "name": "神石：布里特拉的私心",
+      "name_en": "Godstone: Beritra's Selfishness",
+      "type": "godstone"
+    },
+    "30002271": {
+      "name": "神石：希埃爾的自由",
+      "name_en": "Godstone: Siel's Freedom",
+      "type": "godstone"
+    },
+    "30002281": {
+      "name": "神石：艾瑞爾的保護",
+      "name_en": "Godstone: Ariel's Protection",
+      "type": "godstone"
+    },
+    "30002291": {
+      "name": "神石：提亞馬特的善意",
+      "name_en": "Godstone: Tiamat's Benevolence",
+      "type": "godstone"
+    },
+    "30002301": {
+      "name": "神石：伊斯拉佩爾的慈悲",
+      "name_en": "Godstone: Israphel's Mercy",
+      "type": "godstone"
+    },
+    "30002311": {
+      "name": "神石：希埃爾的信任",
+      "name_en": "Godstone: Siel's Faith",
+      "type": "godstone"
+    },
+    "30002321": {
+      "name": "神石：凱西內爾的判斷",
+      "name_en": "Godstone: Kaisinel's Judgment",
+      "type": "godstone"
+    },
+    "30002331": {
+      "name": "神石：艾萊修奇卡的探求",
+      "name_en": "Godstone: Ereshkigal's Inquiry",
+      "type": "godstone"
+    },
+    "30002341": {
+      "name": "神石：吉凱爾的戰略",
+      "name_en": "Godstone: Zikel's Strategy",
+      "type": "godstone"
+    },
+    "30002351": {
+      "name": "神石：艾瑞爾的集中",
+      "name_en": "Godstone: Ariel's Focus",
+      "type": "godstone"
+    },
+    "30002361": {
+      "name": "神石：希埃爾的憤怒",
+      "name_en": "Godstone: Siel's Wrath",
+      "type": "godstone"
+    },
+    "30002371": {
+      "name": "神石：普雷奇翁的侮辱",
+      "name_en": "Godstone: Fregion's Insult",
+      "type": "godstone"
+    },
+    "30010071": {
+      "name": "神石：凱西內爾的片段",
+      "name_en": "Godstone: Kaisinel's Vestige",
+      "type": "godstone"
+    },
+    "30010091": {
+      "name": "神石：佩里翁的悲劇",
+      "name_en": "Godstone: Perion's Tragedy",
+      "type": "godstone"
+    },
+    "30010101": {
+      "name": "神石：希爾拉德的鎖鏈",
+      "name_en": "Godstone: Heladrir's Chains",
+      "type": "godstone"
+    },
+    "30010111": {
+      "name": "神石：烏拉克的咆哮",
+      "name_en": "Godstone: Aulak's Roar",
+      "type": "godstone"
+    },
+    "30010121": {
+      "name": "神石：努亞的謀略",
+      "name_en": "Godstone: Nua's Scheme",
+      "type": "godstone"
+    },
+    "30010131": {
+      "name": "神石：雷伊達的執著",
+      "name_en": "Godstone: Reda's Tenacity",
+      "type": "godstone"
+    },
+    "30010141": {
+      "name": "神石：諾頓的技巧",
+      "name_en": "Godstone: Notun's Craft",
+      "type": "godstone"
+    },
+    "30010151": {
+      "name": "神石：山特拉斯的祕密",
+      "name_en": "Godstone: Santras's Secret",
+      "type": "godstone"
+    },
+    "30010161": {
+      "name": "神石：佩爾克的本能",
+      "name_en": "Godstone: Feruk's Instinct",
+      "type": "godstone"
+    },
+    "30010261": {
+      "name": "神石：菲爾諾斯的憐憫",
+      "name_en": "Godstone: Phernos's Compassion",
+      "type": "godstone"
+    },
+    "30010271": {
+      "name": "神石：艾多林的祈禱",
+      "name_en": "Godstone: Edorin's Prayer",
+      "type": "godstone"
+    },
+    "30010281": {
+      "name": "神石：佩雷格蘭的微笑",
+      "name_en": "Godstone: Peregrine's Smile",
+      "type": "godstone"
+    },
+    "30010291": {
+      "name": "神石：卡倫的加護",
+      "name_en": "Godstone: Karun's Benediction",
+      "type": "godstone"
+    },
+    "30010301": {
+      "name": "神石：卡羅蜜溫的護衛",
+      "name_en": "Godstone: Karemiwen's Escort",
+      "type": "godstone"
+    },
+    "30010311": {
+      "name": "神石：麻松的信賴",
+      "name_en": "Godstone: Mazion's Trust",
+      "type": "godstone"
+    },
+    "30010321": {
+      "name": "神石：艾多林的喊聲",
+      "name_en": "Godstone: Edorin's Battle Cry",
+      "type": "godstone"
+    },
+    "30010331": {
+      "name": "神石：默尼的挑戰",
+      "name_en": "Godstone: Munin's Challenge",
+      "type": "godstone"
+    },
+    "30010341": {
+      "name": "神石：麻松的熱情",
+      "name_en": "Godstone: Mazion's Passion",
+      "type": "godstone"
+    },
+    "30010351": {
+      "name": "神石：艾多林的理解",
+      "name_en": "Godstone: Edorin's Understanding",
+      "type": "godstone"
+    },
+    "30010361": {
+      "name": "神石：佩雷格蘭的強擊",
+      "name_en": "Godstone: Peregrine's Smite",
+      "type": "godstone"
+    },
+    "30010371": {
+      "name": "神石：基強的詭計",
+      "name_en": "Godstone: Kijan's Deceit",
+      "type": "godstone"
+    },
+    "30011071": {
+      "name": "神石：拉斯貝爾格的悲劇",
+      "name_en": "Godstone: Bollvig's Tragedy",
+      "type": "godstone"
+    },
+    "30011091": {
+      "name": "神石：司魯德蓋彌爾的靜默",
+      "name_en": "Godstone: Khrudgelmir's Silence",
+      "type": "godstone"
+    },
+    "30011101": {
+      "name": "神石：海格黛的束縛",
+      "name_en": "Godstone: Charna's Root",
+      "type": "godstone"
+    },
+    "30011111": {
+      "name": "神石：帕西美達斯的威嚴",
+      "name_en": "Godstone: Fasimedes's Dignity",
+      "type": "godstone"
+    },
+    "30011121": {
+      "name": "神石：畢達爾的尊嚴",
+      "name_en": "Godstone: Vidar's Dignity",
+      "type": "godstone"
+    },
+    "30011131": {
+      "name": "神石：泰爾拉斯的忠誠",
+      "name_en": "Godstone: Deltras's Loyalty",
+      "type": "godstone"
+    },
+    "30011141": {
+      "name": "神石：伊奧的悲傷",
+      "name_en": "Godstone: Io's Sadness",
+      "type": "godstone"
+    },
+    "30011151": {
+      "name": "神石：奧理薩的血",
+      "name_en": "Godstone: Orissan's Blood",
+      "type": "godstone"
+    },
+    "30011161": {
+      "name": "神石：瑪希薩的憤怒",
+      "name_en": "Godstone: Mahisha's Wrath",
+      "type": "godstone"
+    },
+    "30011251": {
+      "name": "神石：盧德萊的欺瞞",
+      "name_en": "Godstone: Ludra's Deception",
+      "type": "godstone"
+    },
+    "30011261": {
+      "name": "神石：尤班特斯的策畫",
+      "name_en": "Godstone: Jumentis's Craft",
+      "type": "godstone"
+    },
+    "30011271": {
+      "name": "神石：崔希梅塔斯的妥協",
+      "name_en": "Godstone: Thrasymedes's Compromise",
+      "type": "godstone"
+    },
+    "30011281": {
+      "name": "神石：布雷亞斯的信念",
+      "name_en": "Godstone: Boreas's Conviction",
+      "type": "godstone"
+    },
+    "30011291": {
+      "name": "神石：尤班特斯的默哀",
+      "name_en": "Godstone: Jumentis's Meditation",
+      "type": "godstone"
+    },
+    "30011301": {
+      "name": "神石：海格黛的獻身",
+      "name_en": "Godstone: Charna's Devotion",
+      "type": "godstone"
+    },
+    "30011311": {
+      "name": "神石：安特利夏的光榮",
+      "name_en": "Godstone: Ahserion's Glory",
+      "type": "godstone"
+    },
+    "30011321": {
+      "name": "神石：畢達爾的意識",
+      "name_en": "Godstone: Vidar's Ritual",
+      "type": "godstone"
+    },
+    "30011331": {
+      "name": "神石：伊奧的痛苦",
+      "name_en": "Godstone: Io's Pain",
+      "type": "godstone"
+    },
+    "30011341": {
+      "name": "神石：普萊爾的絕望",
+      "name_en": "Godstone: Freyr's Despair",
+      "type": "godstone"
+    },
+    "30011351": {
+      "name": "神石：司魯德蓋彌爾的刺激",
+      "name_en": "Godstone: Khrudgelmir's Stimulation",
+      "type": "godstone"
+    },
+    "30011361": {
+      "name": "神石：奧理薩的出征",
+      "name_en": "Godstone: Orissan's Campaign",
+      "type": "godstone"
+    },
+    "30011371": {
+      "name": "神石：希芙的狡猾",
+      "name_en": "Godstone: Sif's Guile",
+      "type": "godstone"
+    },
+    "30012071": {
+      "name": "神石：普雷奇翁的計謀",
+      "name_en": "Godstone: Fregion's Schemes",
+      "type": "godstone"
+    },
+    "30012091": {
+      "name": "神石：布里特拉的陰謀",
+      "name_en": "Godstone: Beritra's Conspiracy",
+      "type": "godstone"
+    },
+    "30012101": {
+      "name": "神石：奈薩肯的進軍",
+      "name_en": "Godstone: Nezekan's March",
+      "type": "godstone"
+    },
+    "30012111": {
+      "name": "神石：梅斯蘭泰達的野心",
+      "name_en": "Godstone: Meslamtaeda's Greed",
+      "type": "godstone"
+    },
+    "30012121": {
+      "name": "神石：艾萊修奇卡的名譽",
+      "name_en": "Godstone: Ereshkigal's Honor",
+      "type": "godstone"
+    },
+    "30012131": {
+      "name": "神石：凱西內爾的幻象",
+      "name_en": "Godstone: Kaisinel's Reverie",
+      "type": "godstone"
+    },
+    "30012141": {
+      "name": "神石：露梅爾的干涉",
+      "name_en": "Godstone: Lumiel's Interference",
+      "type": "godstone"
+    },
+    "30012151": {
+      "name": "神石：吉凱爾的傲慢",
+      "name_en": "Godstone: Zikel's Arrogance",
+      "type": "godstone"
+    },
+    "30012161": {
+      "name": "神石：普雷奇翁的策略",
+      "name_en": "Godstone: Fregion's Strategy",
+      "type": "godstone"
+    },
+    "30012251": {
+      "name": "神石：伊斯拉佩爾的從容",
+      "name_en": "Godstone: Israphel's Poise",
+      "type": "godstone"
+    },
+    "30012261": {
+      "name": "神石：吉凱爾的希望",
+      "name_en": "Godstone: Zikel's Hope",
+      "type": "godstone"
+    },
+    "30012271": {
+      "name": "神石：希埃爾的自由",
+      "name_en": "Godstone: Siel's Freedom",
+      "type": "godstone"
+    },
+    "30012281": {
+      "name": "神石：艾瑞爾的保護",
+      "name_en": "Godstone: Ariel's Protection",
+      "type": "godstone"
+    },
+    "30012291": {
+      "name": "神石：提亞馬特的善意",
+      "name_en": "Godstone: Tiamat's Benevolence",
+      "type": "godstone"
+    },
+    "30012301": {
+      "name": "神石：伊斯拉佩爾的慈悲",
+      "name_en": "Godstone: Israphel's Mercy",
+      "type": "godstone"
+    },
+    "30012311": {
+      "name": "神石：希埃爾的信任",
+      "name_en": "Godstone: Siel's Faith",
+      "type": "godstone"
+    },
+    "30012321": {
+      "name": "神石：凱西內爾的判斷",
+      "name_en": "Godstone: Kaisinel's Judgment",
+      "type": "godstone"
+    },
+    "30012331": {
+      "name": "神石：艾萊修奇卡的探求",
+      "name_en": "Godstone: Ereshkigal's Inquiry",
+      "type": "godstone"
+    },
+    "30012341": {
+      "name": "神石：吉凱爾的戰略",
+      "name_en": "Godstone: Zikel's Strategy",
+      "type": "godstone"
+    },
+    "30012351": {
+      "name": "神石：艾瑞爾的集中",
+      "name_en": "Godstone: Ariel's Focus",
+      "type": "godstone"
+    },
+    "30012361": {
+      "name": "神石：希埃爾的憤怒",
+      "name_en": "Godstone: Siel's Wrath",
+      "type": "godstone"
+    },
+    "30012371": {
+      "name": "神石：普雷奇翁的侮辱",
+      "name_en": "Godstone: Fregion's Insult",
+      "type": "godstone"
+    }
+  }
+}

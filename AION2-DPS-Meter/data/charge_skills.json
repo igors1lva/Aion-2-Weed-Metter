@@ -1,0 +1,19 @@
+{
+  "_comment": "集氣技能白名單 — 配合 decode_skill_code() 的 phase 值決定後綴顯示",
+  "_format": "key = CCSS (4位數), value = { name, class, max_phase, suffix }",
+  "_suffix_rule": "phase=0: 無後綴；phase==max_phase(且≥1): MAX；2≤phase<max_phase: II/III。注意 max_phase=1 時 phase 1 即 MAX（見 skill_codec.py 後綴分支）",
+  "_updated": "2026-07-08",
+  "skills": {
+      "1110": { "name": "破滅猛擊", "class": "劍星", "max_phase": 2 },
+      "1136": { "name": "突進一擊", "class": "劍星", "max_phase": 1 },
+      "1209": { "name": "懲罰", "class": "守護星", "max_phase": 3 },
+      "1243": { "name": "盾牌突擊", "class": "守護星", "max_phase": 1 },
+      "1401": { "name": "瞄準箭", "class": "弓星", "max_phase": 3 },
+      "1506": { "name": "地獄火焰", "class": "魔道星", "max_phase": 3 },
+      "1624": { "name": "合擊：破滅攻勢", "class": "精靈星", "max_phase": 3 },
+      "1630": { "name": "元素融合", "class": "精靈星", "max_phase": 3 },
+      "1706": { "name": "霹靂", "class": "治癒星", "max_phase": 3 },
+      "1712": { "name": "痊癒光輝", "class": "治癒星", "max_phase": 1 },
+      "1809": { "name": "突進擊破", "class": "護法星", "max_phase": 3 }
+    }
+}
