@@ -369,7 +369,8 @@ class IconManager:
         if os.path.exists(local_png):
             try:
                 with Image.open(local_png) as img:
-                    photo = ImageTk.PhotoImage(img.copy())
+                    clean_img = _composite_for_colorkey(img.convert("RGBA"), _get_theme_bg_rgb("skill"), alpha_cutoff=75)
+                    photo = ImageTk.PhotoImage(clean_img)
                 self.cache[icon_rel_path] = photo
                 return photo
             except Exception:
@@ -379,7 +380,8 @@ class IconManager:
                 with Image.open(local_webp) as raw_im:
                     img = raw_im.convert("RGBA").resize((20, 20), Image.Resampling.LANCZOS)
                     img.save(local_png)
-                    photo = ImageTk.PhotoImage(img)
+                    clean_img = _composite_for_colorkey(img, _get_theme_bg_rgb("skill"), alpha_cutoff=75)
+                    photo = ImageTk.PhotoImage(clean_img)
                 self.cache[icon_rel_path] = photo
                 return photo
             except Exception:
@@ -1799,7 +1801,7 @@ class SnifferThread(threading.Thread):
 # ─────────────────────────────────────────────
 TRANSPARENT_KEY = "#010203"
 TRANSPARENT_RGB = (1, 2, 3, 255)
-HUD_WIDTH       = 360
+HUD_WIDTH       = 438
 MONSTER_BAR_H   = 26
 PLAYER_BAR_H    = 30
 
@@ -1894,6 +1896,125 @@ CLASS_THEMES = {
         "border":    (62, 88, 128)
     }
 }
+
+def _get_theme_bg_rgb(cname, is_dead=False, is_track=False):
+    t = CLASS_THEMES.get(cname, CLASS_THEMES["templar"])
+    if is_track:
+        t_top, t_bot = t["track_top"], t["track_bot"]
+        return ((t_top[0] + t_bot[0]) // 2, (t_top[1] + t_bot[1]) // 2, (t_top[2] + t_bot[2]) // 2)
+    f_top, f_bot = t["fill_top"], t["fill_bot"]
+    if is_dead:
+        f_top = (int(f_top[0] * 0.48 + 16), int(f_top[1] * 0.48 + 17), int(f_top[2] * 0.48 + 20))
+        f_bot = (int(f_bot[0] * 0.48 + 12), int(f_bot[1] * 0.48 + 13), int(f_bot[2] * 0.48 + 16))
+    return ((f_top[0] + f_bot[0]) // 2, (f_top[1] + f_bot[1]) // 2, (f_top[2] + f_bot[2]) // 2)
+
+def _composite_for_colorkey(rgba_im, bg_rgb, alpha_cutoff=75):
+    """
+    Pré-compõe pixels semitransparentes contra a cor da barra (bg_rgb) com alfa=255
+    e zera alfa < alpha_cutoff. Isso elimina 100% das bordas pretas causadas pelo
+    colorkey (#010203) do Windows ao renderizar ícones suaves no Tkinter Canvas!
+    """
+    out = Image.new("RGBA", rgba_im.size, (0, 0, 0, 0))
+    px_in = rgba_im.load()
+    px_out = out.load()
+    w, h = rgba_im.size
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px_in[x, y]
+            if a < alpha_cutoff:
+                px_out[x, y] = (0, 0, 0, 0)
+            else:
+                af = a / 255.0
+                nr = int(r * af + bg_rgb[0] * (1.0 - af))
+                ng = int(g * af + bg_rgb[1] * (1.0 - af))
+                nb = int(b * af + bg_rgb[2] * (1.0 - af))
+                if (nr, ng, nb) == (1, 2, 3):
+                    nb = 4
+                px_out[x, y] = (nr, ng, nb, 255)
+    return out
+
+def _make_clean_class_pil(fpath):
+    """Remove os pixels pretos/sombra escura embutidos nos PNGs originais e realça o brasão da classe."""
+    with Image.open(fpath) as raw_img:
+        raw = raw_img.convert("RGBA")
+    w, h = raw.size
+    clean = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    px_in = raw.load()
+    px_cl = clean.load()
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px_in[x, y]
+            if a < 35:
+                continue
+            mx = max(r, g, b)
+            if mx < 52:
+                continue
+            elif mx < 85:
+                a = int(a * ((mx - 52) / 33.0))
+            r = min(255, int(r * 1.18 + 14))
+            g = min(255, int(g * 1.18 + 14))
+            b = min(255, int(b * 1.18 + 14))
+            px_cl[x, y] = (r, g, b, a)
+    return clean.resize((20, 20), Image.Resampling.LANCZOS)
+
+def _make_thin_swords_pil():
+    """Gera ícone vetorial de espadas cruzadas finas e elegantes (supersampling 4x -> 12x12) para o CP."""
+    S = 48
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    blade_col = (56, 189, 248, 255)    # #38bdf8
+    shine_col = (186, 230, 253, 255)   # #bae6fd
+    guard_col = (14, 165, 233, 255)    # #0ea5e9
+
+    # Espada 1: inferior-esquerda -> superior-direita
+    d.line([(11, 37), (41, 7)], fill=blade_col, width=4)
+    d.line([(12, 35), (41, 6)], fill=shine_col, width=2)
+    d.line([(10, 26), (22, 38)], fill=guard_col, width=4)
+    d.line([(7, 41), (13, 35)], fill=blade_col, width=4)
+    d.ellipse([5, 39, 10, 44], fill=shine_col)
+
+    # Espada 2: inferior-direita -> superior-esquerda
+    d.line([(37, 37), (7, 7)], fill=blade_col, width=4)
+    d.line([(36, 35), (7, 6)], fill=shine_col, width=2)
+    d.line([(26, 38), (38, 26)], fill=guard_col, width=4)
+    d.line([(41, 41), (35, 35)], fill=blade_col, width=4)
+    d.ellipse([38, 39, 43, 44], fill=shine_col)
+
+    return im.resize((12, 12), Image.Resampling.LANCZOS)
+
+def _make_weed_skull_pil():
+    """Gera a caveira exclusiva Aion 2 Weed Metter (Reaper Skull com chifres, crista em V e olhos brilhantes, 14x14)."""
+    S = 56
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    rim_col  = (153, 27, 27, 255)     # #991b1b
+    bone_top = (254, 226, 226, 255)   # #fee2e2
+    bone_mid = (252, 165, 165, 255)   # #fca5a5
+    bone_jaw = (248, 113, 113, 255)   # #f87171
+    eye_glow = (254, 240, 138, 255)   # #fef08a
+
+    # Chifres laterais e domo craniano
+    d.polygon([(3, 12), (14, 18), (11, 28)], fill=bone_jaw)
+    d.polygon([(52, 12), (41, 18), (44, 28)], fill=bone_jaw)
+    d.ellipse([9, 5, 46, 38], fill=rim_col)
+    d.ellipse([11, 7, 44, 36], fill=bone_mid)
+    d.ellipse([14, 8, 41, 25], fill=bone_top)
+    # Maçãs do rosto e mandíbula com 3 presas afiadas
+    d.polygon([(9, 25), (16, 20), (19, 36), (11, 34)], fill=bone_mid)
+    d.polygon([(46, 25), (39, 20), (36, 36), (44, 34)], fill=bone_mid)
+    d.polygon([(15, 32), (40, 32), (37, 49), (18, 49)], fill=bone_jaw)
+    d.polygon([(22, 39), (25, 39), (24, 51), (22, 51)], fill=(0, 0, 0, 0))
+    d.polygon([(30, 39), (33, 39), (33, 51), (31, 51)], fill=(0, 0, 0, 0))
+    # Órbitas oculares anguladas com brilho dourado interno
+    d.polygon([(13, 21), (24, 24), (22, 31), (13, 28)], fill=(20, 10, 14, 255))
+    d.polygon([(42, 21), (31, 24), (33, 31), (42, 28)], fill=(20, 10, 14, 255))
+    d.ellipse([16, 24, 20, 28], fill=eye_glow)
+    d.ellipse([35, 24, 39, 28], fill=eye_glow)
+    # Cavidade nasal e crista frontal em V (assinatura Weed Metter)
+    d.polygon([(27, 27), (24, 35), (27, 37), (31, 35)], fill=(20, 10, 14, 255))
+    d.polygon([(24, 10), (27, 19), (31, 10), (27, 14)], fill=rim_col)
+
+    return im.resize((14, 14), Image.Resampling.LANCZOS)
 
 class PillRenderer:
     def __init__(self):
@@ -2182,6 +2303,8 @@ class OverlayDPSMeter:
 
         self.pill_renderer = PillRenderer()
         self.class_icons   = {}
+        self.cp_icons      = {}
+        self.skull_icons   = {}
         self.load_class_icons()
 
         self.event_queue = queue.Queue()
@@ -2427,6 +2550,21 @@ class OverlayDPSMeter:
         self._update_target_label(is_dead=self.target_is_dead, dur=self._get_fight_duration() if self.in_combat else 0.0)
 
     def load_class_icons(self):
+        # 1. Pré-renderiza as espadinhas finas do CP e a caveira exclusiva Aion 2 Weed Metter
+        #    pré-compostas contra cada tema de classe (barra cheia e trilha escura), eliminando 100% das bordas pretas!
+        try:
+            raw_swords = _make_thin_swords_pil()
+            raw_skull  = _make_weed_skull_pil()
+            for cname in CLASS_THEMES:
+                for is_dead in (False, True):
+                    for is_track in (False, True):
+                        bg_rgb = _get_theme_bg_rgb(cname, is_dead=is_dead, is_track=is_track)
+                        self.cp_icons[(cname, is_dead, is_track)]    = ImageTk.PhotoImage(_composite_for_colorkey(raw_swords, bg_rgb, alpha_cutoff=65))
+                        self.skull_icons[(cname, is_dead, is_track)] = ImageTk.PhotoImage(_composite_for_colorkey(raw_skull, bg_rgb, alpha_cutoff=75))
+        except Exception:
+            pass
+
+        # 2. Carrega e limpa os brasões de classe (removendo a sombra preta embutida e pré-compondo contra a cor da classe)
         if not os.path.exists(CLASS_ICONS_DIR):
             return
         for cname in ["gladiator", "templar", "assassin", "ranger", "sorcerer", "elementalist", "spiritmaster", "cleric", "chanter", "fighter"]:
@@ -2434,8 +2572,12 @@ class OverlayDPSMeter:
             fpath = os.path.join(CLASS_ICONS_DIR, fname)
             if os.path.exists(fpath):
                 try:
-                    im = Image.open(fpath).convert("RGBA").resize((20, 20), Image.Resampling.LANCZOS)
-                    self.class_icons[cname] = ImageTk.PhotoImage(im)
+                    clean_pil = _make_clean_class_pil(fpath)
+                    for is_dead in (False, True):
+                        bg_rgb = _get_theme_bg_rgb(cname, is_dead=is_dead, is_track=False)
+                        photo = ImageTk.PhotoImage(_composite_for_colorkey(clean_pil, bg_rgb, alpha_cutoff=75))
+                        self.class_icons[(cname, is_dead)] = photo
+                    self.class_icons[cname] = self.class_icons[(cname, False)]
                 except Exception:
                     pass
 
@@ -2775,11 +2917,14 @@ class OverlayDPSMeter:
         rank_txt  = c.create_text(12, 15, text="", anchor="center", fill="#cbd5e1", font=("Segoe UI", 9, "bold"))
         icon_img  = c.create_image(28, 15, anchor="center")
         name_txt  = c.create_text(44, 15, text="", anchor="w", fill="#ffffff", font=("Segoe UI", 10, "bold"))
-        cp_txt    = c.create_text(120, 15, text="", anchor="w", fill="#38bdf8", font=("Segoe UI", 8, "bold"))
-        death_txt = c.create_text(172, 15, text="", anchor="w", fill="#f87171", font=("Segoe UI", 8, "bold"))
+        cp_img    = c.create_image(118, 15, anchor="w")
+        cp_txt    = c.create_text(132, 15, text="", anchor="w", fill="#38bdf8", font=("Segoe UI", 8, "bold"))
+        death_img = c.create_image(172, 15, anchor="w")
+        death_txt = c.create_text(188, 15, text="", anchor="w", fill="#f87171", font=("Segoe UI", 8, "bold"))
 
-        dmg_txt   = c.create_text(HUD_WIDTH - 108, 15, text="", anchor="e", fill="#ffffff", font=("Segoe UI", 10, "bold"))
-        dps_txt   = c.create_text(HUD_WIDTH - 52,  15, text="", anchor="e", fill="#cbd5e1", font=("Segoe UI", 9))
+        dmg_txt   = c.create_text(HUD_WIDTH - 178, 15, text="", anchor="e", fill="#ffffff", font=("Segoe UI", 10, "bold"))
+        dps_txt   = c.create_text(HUD_WIDTH - 120, 15, text="", anchor="e", fill="#cbd5e1", font=("Segoe UI", 9))
+        crit_txt  = c.create_text(HUD_WIDTH - 52,  15, text="", anchor="e", fill="#fbbf24", font=("Segoe UI", 8, "bold"))
         share_txt = c.create_text(HUD_WIDTH - 8,   15, text="", anchor="e", fill="#cbd5e1", font=("Segoe UI", 9))
 
         c.bind("<ButtonPress-1>", self.start_move)
@@ -2791,23 +2936,31 @@ class OverlayDPSMeter:
 
         return {
             "idx": idx, "frame": f, "c": c, "rank": rank_txt, "img": icon_img,
-            "name": name_txt, "cp": cp_txt, "death": death_txt,
-            "col1": dmg_txt, "col2": dps_txt, "col3": share_txt,
+            "name": name_txt, "cp_img": cp_img, "cp": cp_txt,
+            "death_img": death_img, "death": death_txt,
+            "col1": dmg_txt, "col2": dps_txt, "col3": crit_txt, "col4": share_txt,
             "packed": False,
             "_last_pill": None,
             "_last_rank": None,
             "_last_rank_color": None,
-            "_last_img":   None,
-            "_last_name":  None,
-            "_last_cp":    None,
-            "_last_death": None,
-            "_last_col1":  None,
-            "_last_col2":  None,
-            "_last_col3":  None,
+            "_last_img":       None,
+            "_last_name":      None,
+            "_last_cp_img":    None,
+            "_last_cp":        None,
+            "_last_death_img": None,
+            "_last_death":     None,
+            "_last_col1":      None,
+            "_last_col2":      None,
+            "_last_col3":      None,
+            "_last_col4":      None,
         }
 
-    def _update_row(self, row, pill, img_obj, rank_str, rank_color, name_str, cp_str, dmg_str, dps_str, share_str, pad_offset=5, death_str=""):
-        """Atualiza a barra visual no fundo (60% opaco) e os textos na frente (100% nítidos)."""
+    def _update_row(
+        self, row, pill, img_obj, rank_str, rank_color, name_str, cp_str,
+        dmg_str, dps_str, share_str, pad_offset=5, death_str="",
+        crit_str="", p_class="templar", is_dead=False, ratio=1.0, show_cp_icon=False
+    ):
+        """Atualiza a barra visual no fundo (60% opaco) e os textos/ícones na frente (100% nítidos)."""
         idx = row.get("idx", 0)
         if pill is not row["_last_pill"]:
             if hasattr(self, "bg_rows") and idx < len(self.bg_rows):
@@ -2844,17 +2997,50 @@ class OverlayDPSMeter:
             c.itemconfig(row["death"], text=death_str)
             row["_last_death"] = death_str
 
-        if name_changed or cp_changed or death_changed:
-            bbox_n = c.bbox(row["name"])
-            name_end = (bbox_n[2] + pad_offset) if bbox_n else (46 + len(name_str) * 7 + pad_offset)
-            if cp_str:
-                c.coords(row["cp"], name_end, 15)
-                if death_str:
-                    bbox_cp = c.bbox(row["cp"])
-                    cp_end = (bbox_cp[2] + 5) if bbox_cp else (name_end + len(cp_str) * 6 + 5)
-                    c.coords(row["death"], cp_end, 15)
-            elif death_str:
-                c.coords(row["death"], name_end, 15)
+        bar_w = int(HUD_WIDTH * ratio)
+        c_theme = p_class if p_class in CLASS_THEMES else "templar"
+
+        bbox_n = c.bbox(row["name"]) if name_str else None
+        name_end = (bbox_n[2] + pad_offset) if bbox_n else (46 + len(name_str) * 7 + pad_offset)
+
+        if cp_str:
+            if show_cp_icon and hasattr(self, "cp_icons") and self.cp_icons:
+                cp_is_track = (name_end >= bar_w)
+                cp_ic = self.cp_icons.get((c_theme, is_dead, cp_is_track)) or ""
+                if cp_ic != row.get("_last_cp_img"):
+                    c.itemconfig(row["cp_img"], image=cp_ic)
+                    row["_last_cp_img"] = cp_ic
+                c.coords(row["cp_img"], name_end, 15)
+                cp_txt_x = name_end + 14
+            else:
+                if row.get("_last_cp_img"):
+                    c.itemconfig(row["cp_img"], image="")
+                    row["_last_cp_img"] = ""
+                cp_txt_x = name_end
+            c.coords(row["cp"], cp_txt_x, 15)
+            bbox_cp = c.bbox(row["cp"])
+            after_cp_x = (bbox_cp[2] + 6) if bbox_cp else (cp_txt_x + len(cp_str) * 6 + 6)
+        else:
+            if row.get("_last_cp_img"):
+                c.itemconfig(row["cp_img"], image="")
+                row["_last_cp_img"] = ""
+            after_cp_x = name_end
+
+        if death_str:
+            if hasattr(self, "skull_icons") and self.skull_icons:
+                sk_is_track = (after_cp_x >= bar_w)
+                sk_ic = self.skull_icons.get((c_theme, is_dead, sk_is_track)) or ""
+                if sk_ic != row.get("_last_death_img"):
+                    c.itemconfig(row["death_img"], image=sk_ic)
+                    row["_last_death_img"] = sk_ic
+                c.coords(row["death_img"], after_cp_x, 15)
+                c.coords(row["death"], after_cp_x + 16, 15)
+            else:
+                c.coords(row["death"], after_cp_x, 15)
+        else:
+            if row.get("_last_death_img"):
+                c.itemconfig(row["death_img"], image="")
+                row["_last_death_img"] = ""
 
         if dmg_str != row["_last_col1"]:
             c.itemconfig(row["col1"], text=dmg_str)
@@ -2864,9 +3050,13 @@ class OverlayDPSMeter:
             c.itemconfig(row["col2"], text=dps_str)
             row["_last_col2"] = dps_str
 
-        if share_str != row["_last_col3"]:
-            c.itemconfig(row["col3"], text=share_str)
-            row["_last_col3"] = share_str
+        if crit_str != row.get("_last_col3"):
+            c.itemconfig(row["col3"], text=crit_str)
+            row["_last_col3"] = crit_str
+
+        if share_str != row.get("_last_col4"):
+            c.itemconfig(row["col4"], text=share_str)
+            row["_last_col4"] = share_str
 
     def set_visible_rows(self, count):
         count = max(1, min(len(self.rows), count))
@@ -2971,21 +3161,24 @@ class OverlayDPSMeter:
                 row, pill, None,
                 "-", "#cbd5e1",
                 "Aguardando identificar jogador", "",
-                "", "", "", death_str=""
+                "", "", "", death_str="", crit_str="",
+                p_class="skill", is_dead=False, ratio=1.0, show_cp_icon=False
             )
             return
 
         p_class = self.local_class or "templar"
         pill    = self.pill_renderer.get_player_pill(p_class, 1.0, is_local=True)
-        c_icon  = self.class_icons.get(p_class)
+        c_icon  = self.class_icons.get((p_class, False)) or self.class_icons.get(p_class)
         cp_val  = self.local_combat_power
-        cp_str  = f"⚔ {cp_val/1000:.1f}K" if cp_val >= 1000 else (f"⚔ {cp_val}" if cp_val > 0 else "")
+        cp_str  = f"{cp_val/1000:.1f}K" if cp_val >= 1000 else (f"{cp_val}" if cp_val > 0 else "")
 
         self._update_row(
             row, pill, c_icon,
             "1", "#f59e0b",
             self.local_player_name, cp_str,
-            "0", "0/s", "0.0%", death_str=""
+            "0", "0/s", "0.0%", death_str="",
+            crit_str="0% (0)",
+            p_class=p_class, is_dead=False, ratio=1.0, show_cp_icon=bool(cp_str)
         )
 
     def _compute_berserk_epoch(self, berserk_ms):
@@ -3107,9 +3300,10 @@ class OverlayDPSMeter:
                                 c_entry["class"]       = sk_class
                                 c_entry["combatPower"] = self.local_combat_power if is_new_loc else (m_data.get("combatPower") or self.get_player_cp(m_name, caster_key))
                                 if new_k in self.players_combat:
-                                    self.players_combat[new_k]["damage"] += c_entry["damage"]
-                                    self.players_combat[new_k]["hits"]   += c_entry["hits"]
-                                    self.players_combat[new_k]["crits"]  += c_entry["crits"]
+                                    self.players_combat[new_k]["damage"]       += c_entry["damage"]
+                                    self.players_combat[new_k]["hits"]         += c_entry["hits"]
+                                    self.players_combat[new_k]["overTimeHits"]  = self.players_combat[new_k].get("overTimeHits", 0) + c_entry.get("overTimeHits", 0)
+                                    self.players_combat[new_k]["crits"]        += c_entry["crits"]
                                 else:
                                     self.players_combat[new_k] = c_entry
                                 break
@@ -3553,9 +3747,10 @@ class OverlayDPSMeter:
                         if p_cls: entry["class"] = p_cls
                         if cp_v > 0: entry["combatPower"] = cp_v
                         if p_name in self.players_combat:
-                            self.players_combat[p_name]["damage"] += entry["damage"]
-                            self.players_combat[p_name]["hits"]   += entry["hits"]
-                            self.players_combat[p_name]["crits"]  += entry["crits"]
+                            self.players_combat[p_name]["damage"]       += entry["damage"]
+                            self.players_combat[p_name]["hits"]         += entry["hits"]
+                            self.players_combat[p_name]["overTimeHits"]  = self.players_combat[p_name].get("overTimeHits", 0) + entry.get("overTimeHits", 0)
+                            self.players_combat[p_name]["crits"]        += entry["crits"]
                         else:
                             self.players_combat[p_name] = entry
                         needs_redraw = True
@@ -4447,10 +4642,10 @@ class OverlayDPSMeter:
             ratio   = max(0.0, min(1.0, dmg / top_dmg))
 
             pill   = self.pill_renderer.get_player_pill(p_class, ratio, is_local=p["is_local"], is_dead=is_dead)
-            c_icon = self.class_icons.get(p_class)
+            c_icon = self.class_icons.get((p_class, is_dead)) or self.class_icons.get(p_class)
 
             display_name = p["name"]
-            max_n_len = 8 if deaths > 0 else 10
+            max_n_len = 10 if deaths > 0 else 11
             if len(display_name) > max_n_len:
                 display_name = display_name[:max_n_len - 1] + "…"
 
@@ -4460,10 +4655,10 @@ class OverlayDPSMeter:
             )
             if cp_val > 0 and p.get("combatPower", 0) == 0:
                 p["combatPower"] = cp_val
-            cp_str    = f"⚔ {cp_val/1000:.1f}K" if cp_val >= 1000 else (f"⚔ {cp_val}" if cp_val > 0 else "")
-            death_str = f"💀 {deaths}" if deaths > 0 else ""
+            cp_str    = f"{cp_val/1000:.1f}K" if cp_val >= 1000 else (f"{cp_val}" if cp_val > 0 else "")
+            death_str = str(deaths) if deaths > 0 else ""
 
-            # Formatação idêntica ao Exemplo 2 (Print anexado):
+            # Formatação de Métricas:
             # 1. Dano Total em Milhões / k (ex: 614.5k, 30.21M, 12.47M)
             if dmg >= 1_000_000:
                 dmg_str = f"{dmg/1_000_000:.2f}M"
@@ -4472,13 +4667,20 @@ class OverlayDPSMeter:
             else:
                 dmg_str = f"{dmg:,.0f}"
 
-            # 2. DPS suave (ex: 7.7k/s, 90.6k)
+            # 2. DPS suave (ex: 7.7k/s, 90.6k/s)
             if dps >= 1000:
                 dps_str = f"{dps/1000:.1f}k/s"
             else:
                 dps_str = f"{dps:,.0f}/s"
 
-            # 3. Share % (ex: 26.4%)
+            # 3. Crit % e Crit Hit (Idêntico ao Questlog combat.cjs: hits diretos e crits diretos, sem diluição por DoT)
+            p_hits  = p.get("hits", 0)
+            p_crits = p.get("crits", 0)
+            crit_pct = (p_crits / p_hits * 100.0) if p_hits > 0 else 0.0
+            crits_fmt = f"{p_crits/1000:.1f}k" if p_crits >= 1000 else str(p_crits)
+            crit_str = f"{crit_pct:.0f}% ({crits_fmt})"
+
+            # 4. Share % (ex: 26.4%)
             share_str = f"{share:.1f}%"
 
             rank_str = str(i + 1)
@@ -4490,7 +4692,12 @@ class OverlayDPSMeter:
                 display_name, cp_str,
                 dmg_str, dps_str, share_str,
                 pad_offset=5,
-                death_str=death_str
+                death_str=death_str,
+                crit_str=crit_str,
+                p_class=p_class,
+                is_dead=is_dead,
+                ratio=ratio,
+                show_cp_icon=bool(cp_str)
             )
 
     def render_skills(self, dur):
@@ -4519,8 +4726,12 @@ class OverlayDPSMeter:
             dmg    = sk["damage"]
             sk_dps = dmg / dur
             share  = (dmg / total_local) * 100.0
-            crit   = (sk["crits"] / sk["hits"] * 100.0) if sk["hits"] else 0.0
-            total_sk_hits = sk["hits"] + sk.get("overTimeHits", 0)
+            sk_hits  = sk.get("hits", 0)
+            sk_crits = sk.get("crits", 0)
+            crit_pct = (sk_crits / sk_hits * 100.0) if sk_hits > 0 else 0.0
+            crits_fmt = f"{sk_crits/1000:.1f}k" if sk_crits >= 1000 else str(sk_crits)
+            crit_str = f"{crit_pct:.0f}% ({crits_fmt})"
+            total_sk_hits = sk_hits + sk.get("overTimeHits", 0)
             ratio  = max(0.0, min(1.0, dmg / max_dmg))
 
             pill = self.pill_renderer.get_player_pill("skill", ratio, is_local=False)
@@ -4531,8 +4742,8 @@ class OverlayDPSMeter:
             if sk_icon and icon_img is None and sk_icon in ICON_MGR.downloading:
                 pending_icons = True
 
-            if len(sk_name) > 11:
-                sk_name = sk_name[:10] + "…"
+            if len(sk_name) > 13:
+                sk_name = sk_name[:12] + "…"
 
             if sk_dps >= 1000:
                 dps_num = f"{sk_dps/1000:.1f}k/s"
@@ -4555,7 +4766,12 @@ class OverlayDPSMeter:
                 sk_name, f"⚡{total_sk_hits}",
                 dmg_num, dps_num, f"{share:.1f}%",
                 pad_offset=5,
-                death_str=""
+                death_str="",
+                crit_str=crit_str,
+                p_class="skill",
+                is_dead=False,
+                ratio=ratio,
+                show_cp_icon=False
             )
 
         self._has_pending_skill_icons = pending_icons
