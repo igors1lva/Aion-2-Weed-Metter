@@ -1974,6 +1974,7 @@ class OverlayDPSMeter:
         self.encounter_boss_keys     = set()
         self.active_boss_key         = None
         self.combat_frozen           = False
+        self.killed_boss_names       = set()
         self.player_dead_state       = {}   # name_lower -> {'is_dead': bool, 'last_death_t': float, 'deaths': int}
 
         self.players_combat = {}
@@ -2769,6 +2770,9 @@ class OverlayDPSMeter:
         self.target_is_dead          = False
         self.combat_frozen           = False
         self.active_target_cur_hp    = None
+        self.active_target_max_hp    = None
+        self.active_target_berserk_ms = 0
+        self.active_target_berserk_epoch = None
         self.active_target_name      = "Nenhum alvo"
         self._has_pending_skill_icons = False
         self.show_standby_local_player()
@@ -2887,12 +2891,24 @@ class OverlayDPSMeter:
 
         # 1. Já confirmado como jogador local?
         if self.local_player_key and caster_key == self.local_player_key:
+            if not self.player_identified or self.local_player_name in (None, "", "Aguardando identificar jogador"):
+                if self.party_members:
+                    unkeyed = [m for m, d in self.party_members.items() if not d.get("key") or d.get("key") == caster_key]
+                    if unkeyed:
+                        self.local_player_name = unkeyed[0]
+                        self.player_identified = True
+                if not self.player_identified and self.known_chars:
+                    for kn, kd in self.known_chars.items():
+                        if isinstance(kd, dict) and kd.get("class") == self.local_class:
+                            self.local_player_name = kn
+                            self.player_identified = True
+                            break
             return self.local_player_name, True
 
         # 2. Já mapeado em players_names?
         if caster_key in self.players_names:
             name = self.players_names[caster_key]
-            is_loc = bool(self.player_identified and name.lower() == self.local_player_name.lower())
+            is_loc = bool(self.player_identified and self.local_player_name and name.lower() == self.local_player_name.lower())
             if is_loc and not self.local_player_key:
                 self.local_player_key = caster_key
             return name, is_loc
@@ -2901,7 +2917,7 @@ class OverlayDPSMeter:
         for m_name, m_data in self.party_members.items():
             if m_data.get("key") and m_data["key"] == caster_key:
                 self.players_names[caster_key] = m_name
-                is_loc = bool(self.player_identified and m_name.lower() == self.local_player_name.lower())
+                is_loc = bool(self.player_identified and self.local_player_name and m_name.lower() == self.local_player_name.lower())
                 if is_loc and not self.local_player_key:
                     self.local_player_key = caster_key
                 return m_name, is_loc
@@ -2909,33 +2925,61 @@ class OverlayDPSMeter:
         # 4. Determina a classe da habilidade utilizada:
         sk_class = get_class_by_skill_id(sk_id) if sk_id else None
 
-        # 5. Se o jogador local já está identificado por nome/classe mas ainda não tem local_player_key:
-        if not self.local_player_key and self.player_identified and self.local_player_name:
-            # SÓ pode ser o jogador local se a habilidade bater com a classe dele!
-            if sk_class and self.local_class and sk_class == self.local_class:
+        # 5. Se o jogador local ainda não tem local_player_key:
+        if not self.local_player_key and self.local_class:
+            if sk_class and sk_class == self.local_class:
                 self.local_player_key = caster_key
-                self.players_names[caster_key] = self.local_player_name
-                for m_name, m_data in self.party_members.items():
-                    if m_name.lower() == self.local_player_name.lower():
-                        m_data["key"] = caster_key
-                        break
-                log(f"[AutoID] Confirmado local_player_key={caster_key} para {self.local_player_name} via skill {sk_id} ({sk_class})")
-                return self.local_player_name, True
+                if not self.player_identified or self.local_player_name in (None, "", "Aguardando identificar jogador"):
+                    if self.party_members:
+                        unkeyed = [m for m, d in self.party_members.items() if d.get("class") == self.local_class]
+                        if unkeyed:
+                            self.local_player_name = unkeyed[0]
+                            self.player_identified = True
+                    if not self.player_identified and self.known_chars:
+                        for kn, kd in self.known_chars.items():
+                            if isinstance(kd, dict) and kd.get("class") == self.local_class:
+                                self.local_player_name = kn
+                                self.player_identified = True
+                                break
+                if self.player_identified and self.local_player_name:
+                    self.players_names[caster_key] = self.local_player_name
+                    for m_name, m_data in self.party_members.items():
+                        if m_name.lower() == self.local_player_name.lower():
+                            m_data["key"] = caster_key
+                            break
+                    log(f"[AutoID] Confirmado local_player_key={caster_key} para {self.local_player_name} via skill {sk_id} ({sk_class})")
+                    return self.local_player_name, True
 
         # 6. Associa a key a um membro da party/raid (da mesma classe e cuja key ainda seja 0):
-        if sk_class and self.party_members:
-            unkeyed_members = [
-                (m_name, m_data) for m_name, m_data in self.party_members.items()
-                if m_data.get("class") == sk_class and not m_data.get("key")
-                and (not self.player_identified or m_name.lower() != self.local_player_name.lower())
-            ]
-            if unkeyed_members:
-                matched_name, m_data = unkeyed_members[0]
-                m_data["key"] = caster_key
-                self.party_member_keys.add(caster_key)
-                self.players_names[caster_key] = matched_name
-                log(f"[RaidID] Associado membro da raid {matched_name} ({sk_class}) -> Key={caster_key}")
-                return matched_name, False
+        if self.party_members:
+            if sk_class:
+                unkeyed_members = [
+                    (m_name, m_data) for m_name, m_data in self.party_members.items()
+                    if m_data.get("class") == sk_class and not m_data.get("key")
+                    and (not self.player_identified or not self.local_player_name or m_name.lower() != self.local_player_name.lower())
+                ]
+                if unkeyed_members:
+                    matched_name, m_data = unkeyed_members[0]
+                    m_data["key"] = caster_key
+                    self.party_member_keys.add(caster_key)
+                    self.players_names[caster_key] = matched_name
+                    log(f"[RaidID] Associado membro da raid {matched_name} ({sk_class}) -> Key={caster_key}")
+                    return matched_name, False
+            else:
+                # sk_class é None (ataque básico / auto-attack)
+                # Se restar apenas 1 membro da party sem key (ex: Prada), associa automaticamente!
+                unkeyed_members = [
+                    (m_name, m_data) for m_name, m_data in self.party_members.items()
+                    if not m_data.get("key")
+                    and (not self.player_identified or not self.local_player_name or m_name.lower() != self.local_player_name.lower())
+                ]
+                if len(unkeyed_members) == 1:
+                    matched_name, m_data = unkeyed_members[0]
+                    m_data["key"] = caster_key
+                    self.party_member_keys.add(caster_key)
+                    self.players_names[caster_key] = matched_name
+                    log(f"[RaidID] Associado membro único sem key {matched_name} -> Key={caster_key}")
+                    return matched_name, False
 
         # 7. Se o jogador local ainda não foi identificado, NUNCA adivinha por combatentes próximos ou histórico.
         # Aguarda estritamente o teleporte ou login de personagem:
@@ -3025,20 +3069,24 @@ class OverlayDPSMeter:
                         self.local_player_key = w_key
                         if self.local_player_name and self.local_player_name != "Aguardando identificar jogador":
                             self.players_names[w_key] = self.local_player_name
+                    # Teleporte concluído: reseta métricas de combate e aguarda novo alvo!
+                    self.reset_metrics()
 
             # 0.5. Mudança de Mapa / Entrada em Dungeon (PrepareEnterMap_NT 13857)
             elif etype == "map_change":
                 new_map = evt.get("map_id")
-                if new_map != self.current_map_id:
-                    self.current_map_id = new_map
-                    # Limpa entidades do mapa anterior e redefine keys dinâmicas de instâncias
-                    self.npc_registry.clear()
-                    self.summon_owners.clear()
-                    self.party_member_keys.clear()
-                    self.local_player_key = None
-                    self.players_names.clear()
-                    for m_name, m_data in self.party_members.items():
-                        m_data["key"] = 0
+                self.current_map_id = new_map
+                # Limpa entidades do mapa anterior e redefine keys dinâmicas de instâncias
+                self.npc_registry.clear()
+                self.summon_owners.clear()
+                self.party_member_keys.clear()
+                self.local_player_key = None
+                self.players_names.clear()
+                self.killed_boss_names.clear()
+                for m_name, m_data in self.party_members.items():
+                    m_data["key"] = 0
+                # Teleportou / entrou ou saiu da dungeon: reseta métricas de combate e aguarda novo alvo!
+                self.reset_metrics()
 
             # 0.6. Status do Sniffer de Rede (TShark / Npcap)
             elif etype == "sniffer_status":
@@ -3080,6 +3128,36 @@ class OverlayDPSMeter:
                             break
                     if not p_name and len(self.account_characters) == 1:
                         p_name = self.account_characters[0]["name"]
+
+                # Dedução inteligente caso o medidor tenha sido iniciado com o jogo já aberto:
+                if not p_name and self.party_members:
+                    matching_class_members = [
+                        m_name for m_name, m_data in self.party_members.items()
+                        if m_data.get("class") == self.local_class
+                    ]
+                    if len(matching_class_members) == 1:
+                        p_name = matching_class_members[0]
+                    elif len(matching_class_members) > 1 and self.local_combat_power > 0:
+                        matching_class_members.sort(key=lambda m: abs(self.party_members[m].get("combatPower", 0) - self.local_combat_power))
+                        p_name = matching_class_members[0]
+                    elif not matching_class_members:
+                        unkeyed = [
+                            m_name for m_name, m_data in self.party_members.items()
+                            if not m_data.get("key") or m_data.get("key") == self.local_player_key
+                        ]
+                        if len(unkeyed) == 1:
+                            p_name = unkeyed[0]
+
+                if not p_name and self.known_chars:
+                    matching_known = [
+                        k_name for k_name, k_data in self.known_chars.items()
+                        if isinstance(k_data, dict) and k_data.get("class") == self.local_class
+                    ]
+                    if len(matching_known) == 1:
+                        p_name = matching_known[0]
+                    elif len(matching_known) > 1 and self.local_combat_power > 0:
+                        matching_known.sort(key=lambda k: abs(self.known_chars[k].get("combatPower", 0) - self.local_combat_power))
+                        p_name = matching_known[0]
 
                 if p_name:
                     self.local_player_name = p_name
@@ -3401,6 +3479,8 @@ class OverlayDPSMeter:
                             self.target_is_dead       = True
                             self.combat_frozen        = True
                             self.active_target_cur_hp = 0
+                            if self.active_target_name and self.active_target_name not in ("Monstro", "Chefe", "Nenhum alvo"):
+                                self.killed_boss_names.add(self.active_target_name)
                         elif (
                             self.in_combat
                             and not self.combat_frozen
@@ -3547,7 +3627,23 @@ class OverlayDPSMeter:
                     self.target_is_dead      = False
                     self.combat_frozen       = False
                     self.active_target_key   = target_key
-                    t_name = (target_npc.get("name") if target_npc else None) or ("Chefe" if target_is_boss else "Monstro")
+                    t_name = (target_npc.get("name") if target_npc else None)
+                    if not t_name or t_name in ("Monstro", "Chefe"):
+                        if self.current_map_id and self.current_map_id in DUNGEON_BOSSES:
+                            d_boss_ids = DUNGEON_BOSSES[self.current_map_id]
+                            remaining = [
+                                get_boss_name(bid) for bid in d_boss_ids
+                                if get_boss_name(bid) and get_boss_name(bid) not in self.killed_boss_names
+                            ]
+                            if remaining:
+                                if len(self.killed_boss_names) >= 1:
+                                    t_name = remaining[-1]
+                                else:
+                                    t_name = remaining[0]
+                                target_is_boss = True
+                                self.encounter_has_boss = True
+                    if not t_name:
+                        t_name = "Chefe" if target_is_boss else "Monstro"
                     self.active_target_name          = t_name
                     self.active_target_cur_hp        = target_npc.get("hp") if target_npc else None
                     self.active_target_max_hp        = (target_npc.get("hp_max") if target_npc else 0) or 0
@@ -3587,6 +3683,23 @@ class OverlayDPSMeter:
                     if main_npc.get("berserk_ms"):
                         self.active_target_berserk_ms    = main_npc["berserk_ms"]
                         self.active_target_berserk_epoch = self._compute_berserk_epoch(self.active_target_berserk_ms)
+
+                # Se o alvo ativo ainda estiver genérico ("Monstro" ou "Chefe"), recupera o nome da dungeon atual:
+                if (not self.active_target_name or self.active_target_name in ("Monstro", "Chefe")) and self.current_map_id and self.current_map_id in DUNGEON_BOSSES:
+                    d_boss_ids = DUNGEON_BOSSES[self.current_map_id]
+                    remaining = [
+                        get_boss_name(bid) for bid in d_boss_ids
+                        if get_boss_name(bid) and get_boss_name(bid) not in self.killed_boss_names
+                    ]
+                    if remaining:
+                        if len(self.killed_boss_names) >= 1:
+                            self.active_target_name = remaining[-1]
+                        else:
+                            self.active_target_name = remaining[0]
+                        self.encounter_has_boss = True
+                        if main_npc:
+                            main_npc["name"] = self.active_target_name
+                            main_npc["is_boss"] = True
 
                 self.last_hit_t = hit_t
 
@@ -3690,6 +3803,8 @@ class OverlayDPSMeter:
                     self.target_is_dead       = True
                     self.combat_frozen        = True
                     self.active_target_cur_hp = 0
+                    if self.active_target_name and self.active_target_name not in ("Monstro", "Chefe", "Nenhum alvo"):
+                        self.killed_boss_names.add(self.active_target_name)
                     needs_redraw = True
                 elif dead_key in self.npc_registry:
                     # Apenas um add / minion / lacaio morreu durante a luta do Boss:
@@ -3755,19 +3870,27 @@ class OverlayDPSMeter:
         if is_dead:
             pct = 0
             ratio = 0.0
-        elif self.active_target_max_hp and self.active_target_max_hp > 0:
-            if self.active_target_cur_hp is not None and self.active_target_cur_hp >= 0:
-                rem_hp = max(0, min(self.active_target_max_hp, self.active_target_cur_hp))
-            else:
-                rem_hp = max(0, self.active_target_max_hp - total_dmg)
-            pct = int((rem_hp / self.active_target_max_hp) * 100)
-            ratio = max(0.0, min(1.0, rem_hp / self.active_target_max_hp))
-            # Calcula TTK (Tempo estimado para o Boss morrer no DPS atual do grupo/solo)
-            if self.in_combat and dur >= 1.0 and party_dps > 0 and rem_hp > 0:
-                ttk_sec = int(math.ceil(rem_hp / party_dps))
         else:
-            pct = 100
-            ratio = 0.36  # Pílula vermelha sob o nome quando HP máximo não informado
+            # Se active_target_max_hp ainda não foi capturado, estima pelo HP atual + dano total causado
+            if (not self.active_target_max_hp or self.active_target_max_hp <= 0) and self.in_combat:
+                if self.active_target_cur_hp is not None and self.active_target_cur_hp > 0:
+                    self.active_target_max_hp = max(total_dmg, self.active_target_cur_hp + total_dmg)
+                elif total_dmg > 0:
+                    self.active_target_max_hp = max(10_000_000, total_dmg * 2)
+
+            if self.active_target_max_hp and self.active_target_max_hp > 0:
+                if self.active_target_cur_hp is not None and self.active_target_cur_hp >= 0:
+                    rem_hp = max(0, min(self.active_target_max_hp, self.active_target_cur_hp))
+                else:
+                    rem_hp = max(0, self.active_target_max_hp - total_dmg)
+                pct = int((rem_hp / self.active_target_max_hp) * 100)
+                ratio = max(0.0, min(1.0, rem_hp / self.active_target_max_hp))
+                # Calcula TTK (Tempo estimado para o Boss morrer no DPS atual do grupo/solo)
+                if self.in_combat and dur >= 1.0 and party_dps > 0 and rem_hp > 0:
+                    ttk_sec = int(math.ceil(rem_hp / party_dps))
+            else:
+                pct = 100
+                ratio = 0.36  # Pílula vermelha sob o nome quando HP máximo não informado
 
         # Formata informações da direita: %HP · DPS da PT · 💀 Time to Death · Tempo de luta (ou Enrage)
         left_boundary = HUD_WIDTH - 10
