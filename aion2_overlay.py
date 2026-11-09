@@ -313,9 +313,31 @@ def get_class_by_pcid(pcid):
 def get_class_by_skill_id(skill_id):
     if not skill_id:
         return None
-    s_str = str(skill_id)
-    if len(s_str) >= 2:
-        pfx = s_str[:2]
+    try:
+        sid = int(skill_id)
+    except Exception:
+        return None
+
+    # Ataques básicos específicos de classe no banco oficial do Questlog (questlog_skills.json)
+    if sid in (1001390, 1010040, 1010046):
+        return "ranger"
+    if sid == 1001420:
+        return "gladiator"
+    if sid in (1001430, 1001440) or 100011 <= sid <= 100048:
+        return "elementalist"
+
+    # IMPORTANTE (Questlog questlog_skills.json):
+    # - Skills de 7 dígitos (1_000_000 .. 9_999_999, como 1200500, 1500020, 1600020, 1800000)
+    #   são EXCLUSIVAMENTE skills de Monstros / NPCs / Itens / Godstones! NUNCA devem ser tratadas como classe de jogador!
+    # - Skills comuns de 4 dígitos (1001..1299 Glide/Dash/Divine Power, 4001..4099 Dodge) são comuns a todas as classes!
+    if 100_000 <= sid <= 9_999_999:
+        return None
+    if sid < 1300 or (4000 <= sid <= 4099):
+        return None
+
+    # Skills reais de classe de jogador: 8 dígitos (11_000_000 .. 19_999_999) ou base 4 dígitos (1300..1999)
+    if (11_000_000 <= sid <= 19_999_999) or (1300 <= sid <= 1999):
+        pfx = str(sid)[:2]
         if pfx == "11": return "gladiator"
         if pfx == "12": return "templar"
         if pfx == "13": return "assassin"
@@ -667,11 +689,12 @@ def read_abnormal(r):
 # Conjunto O(1) de opcodes monitorados para descarte imediato de pacotes irrelevantes (~85% do tráfego)
 HANDLED_OPCODES = frozenset({
     13824, 13845, 13857, 13875, 13889, 13890, 13893, 13910,
-    14140, 14141,
     14340, 14341, 14388, 14389,
+    22318,
     36096, 36100, 36129,
-    37376, 37389, 37395, 37401, 37403, 37404, 37407, 37410, 37663,
-    38402, 38410, 38426, 38427, 38434, 38443, 38444, 38446
+    37376, 37389, 37395, 37401, 37403, 37404, 37407, 37408, 37410, 37663,
+    38402, 38410, 38426, 38427, 38434, 38443, 38444, 38446,
+    38658, 38667
 })
 
 # ─────────────────────────────────────────────
@@ -768,22 +791,46 @@ class PacketDispatcher:
                             "local_ms":    int(time.time() * 1000)
                         })
 
-            # 0.2. Login_RS (13845): Lista de Personagens na Conta ao Conectar
+            # 0.2. Login_RS (13845): Lista de Personagens na Conta ao Conectar (Idêntico ao $4 / x4 do Questlog)
             elif opcode == 13845:
                 try:
                     res = reader.u16()
                     if res == 0:
                         reader.i64(); reader.i64()  # serverNow, serverNowLocal
                         chars_list = []
-                        cnt = reader.vi32()
+                        cnt = reader.v32()
                         for _ in range(cnt):
                             k = reader.i32()
                             n = reader.str()
                             pid = reader.i32()
-                            reader.u8(); reader.u8(); reader.i32(); reader.i32(); reader.i32()
+                            reader.u8(); reader.u8()  # race, gender
+                            reader.i32(); reader.i32(); reader.i32()  # level, conquerorLevel, equipItemLevel
+                            c_dbid = 0
+                            c_cp = 0
+                            try:
+                                reader.i64(); reader.i32(); reader.i64()  # exp, combatLevel, combatExp
+                                reader.str(); reader.i64()  # guildName, logoutTime
+                                read_pos(reader); reader.i32(); reader.i64(); reader.i64()  # pos, zoneId, regTime, pendingDeleteTime
+                                reader.list(read_equip)  # lobbyEquips
+                                c_dbid = int(reader.i64())
+                                reader.i32(); reader.i64(); reader.i32(); reader.i32()  # blockReasonNo, blockEndTime, wingId, wingSkinId
+                                reader.list(lambda r: r.u8())  # customizingData
+                                reader.u8(); reader.bool()  # voiceType, preGenerated
+                                reader.list(lambda r: (r.i32(), r.i64(), r.bool(), r.i64()))  # itemCountList (S4)
+                                reader.i64(); reader.u8()  # lastNicknameChangeTime, slotNo
+                                c_cp = int(reader.i64())
+                            except Exception:
+                                pass
                             cls = get_class_by_pcid(pid)
-                            if n:
-                                chars_list.append({"key": k, "name": n, "pcId": pid, "class": cls})
+                            if n and not n.startswith("$"):
+                                chars_list.append({
+                                    "key":         k,
+                                    "dbid":        c_dbid,
+                                    "name":        n,
+                                    "pcId":        pid,
+                                    "class":       cls,
+                                    "combatPower": c_cp if c_cp > 0 else 0
+                                })
                         if chars_list:
                             self.event_queue.put({
                                 "type": "login_characters",
@@ -792,15 +839,7 @@ class PacketDispatcher:
                 except Exception:
                     pass
 
-            # 0.4. CharWarpEnter_NT (14141): Conclusão de Teleporte / Mudança de Instância (Questlog 0.1.48)
-            elif opcode == 14141:
-                try:
-                    w_key = reader.vi32()
-                    self.event_queue.put({"type": "warp_enter", "key": w_key})
-                except Exception:
-                    pass
-
-            # 0.5. PrepareEnterMap_NT (13857): Troca de Mapa / Entrada em Dungeon
+            # 0.5. PrepareEnterMap_NT (13857): Troca de Mapa / Entrada em Dungeon (Idêntico ao PrepareEnterMap_NT do Questlog)
             elif opcode == 13857:
                 reader.i32()
                 map_id = reader.i32()
@@ -817,7 +856,7 @@ class PacketDispatcher:
                 if map_id > 0:
                     self.event_queue.put({"type": "map_change", "map_id": map_id})
 
-            # 1. MyCharAppear_NT (13875): Próprio Jogador (Ao mudar de mapa / carregar / entrar em Dungeon)
+            # 1. MyCharAppear_NT (13875): Próprio Jogador (Idêntico ao A4 do Questlog)
             elif opcode == 13875:
                 char_key = reader.vi32()
                 flags = reader.u32()
@@ -826,6 +865,7 @@ class PacketDispatcher:
                 serverId = reader.u16()
                 pcId = reader.i32()
                 p_class = get_class_by_pcid(pcId)
+                local_dbid = 0
                 cp_val = 0
                 try:
                     if t & 2: reader.u8()
@@ -850,7 +890,7 @@ class PacketDispatcher:
                     if flags & 8: reader.i32()
                     if flags & 16: read_pos(reader)
                     if flags & 32: reader.u16()
-                    reader.i64()
+                    local_dbid = int(reader.i64())
                     if flags & 64: reader.f32()
                     if flags & 128: reader.i32()
                     if flags & 256: reader.u8()
@@ -893,32 +933,81 @@ class PacketDispatcher:
                             break
 
                 if char_key:
-                    log(f"MyCharAppear_NT: Key={char_key}, Nick='{nick}', pcId={pcId}, Class={p_class}, CP={cp_val}")
+                    log(f"MyCharAppear_NT: Key={char_key}, DBID={local_dbid}, Nick='{nick}', pcId={pcId}, Class={p_class}, CP={cp_val}")
                     self.event_queue.put({
                         "type":        "my_char",
                         "key":         char_key,
+                        "dbid":        local_dbid if local_dbid > 0 else 0,
                         "name":        nick,
                         "pcId":        pcId,
                         "class":       p_class,
                         "combatPower": cp_val
                     })
 
-            # 2. CharAppear_NT (13893): Outros Jogadores (+ Combat Power nos últimos 10 bytes: combatPower i64, dieType u8, peaceShowWeapon bool)
+            # 2. CharAppear_NT (13893): Outros Jogadores (Idêntico ao w4 do Questlog: extrai dbid + combatPower)
             elif opcode == 13893:
                 char_key = reader.vi32()
-                reader.u32()
-                desc = read_desc(reader)
-                if desc['nickname'] and 1 <= desc.get('pcId', 0) <= 60:
-                    p_class = get_class_by_pcid(desc.get('pcId', 0))
-                    cp_val = 0
-                    if end - start >= 32:
+                flags    = reader.u32()
+                desc     = read_desc(reader)
+                pc_id    = desc.get('pcId', 0)
+                if 1 <= pc_id <= 60:
+                    p_class  = get_class_by_pcid(pc_id)
+                    dbid_val = 0
+                    cp_val   = 0
+                    try:
+                        read_state(reader)
+                        if flags & 1: reader.u16()
+                        if flags & 2:
+                            reader.i64(); reader.str(); reader.u16(); reader.u8(); reader.i32(); reader.i64(); reader.u16(); reader.str()
+                        reader.list(read_abnormal)
+                        reader.list(read_equip)
+                        if flags & 4: reader.u8()
+                        if flags & 8: reader.u8()
+                        if flags & 16: reader.bool()
+                        if flags & 32: reader.bool()
+                        if flags & 64: reader.u8()
+                        if flags & 128: read_pos(reader)
+                        if flags & 256: reader.i64()
+                        if flags & 512: reader.u16()
+                        if flags & 1024: reader.u16()
+                        if flags & 2048: reader.i64()
+                        if flags & 4096: reader.bool()
+                        if flags & 8192: reader.u8()
+                        if flags & 16384: reader.bool()
+                        dbid_val = int(reader.i64())
+                        reader.list(lambda r: (r.u16(), r.i32()))  # stats
+                        reader.i32(); reader.i32(); reader.i32()   # level, conquerorLevel, equipItemLevel
+                        if flags & 32768: reader.i32()
+                        if flags & 65536: reader.i32()
+                        if flags & 131072: reader.i32()
+                        reader.list(lambda r: r.u8())              # customizingData
+                        if flags & 262144: reader.u8()
+                        if flags & 524288: reader.i32()
+                        if flags & 1048576:
+                            st = reader.u8()
+                            reader.u8(); reader.i32(); reader.u8(); reader.u8(); reader.bool(); reader.i32()
+                            if st & 1: reader.i64()
+                            if st & 2: reader.i32()
+                            if st & 4: reader.i64()
+                            if st & 8: reader.i32()
+                        if flags & 2097152: reader.i32()
+                        if flags & 4194304: reader.i32()
+                        if flags & 8388608: reader.i32()
+                        if flags & 16777216: reader.i32()
+                        if flags & 33554432: reader.bool()
+                        if flags & 67108864: reader.i32()
+                        cp_val = int(reader.i64())
+                    except Exception:
+                        pass
+
+                    if not (1000 <= cp_val <= 10_000_000) and end - start >= 32:
+                        cp_val = 0
                         try:
                             raw_cp = struct.unpack_from('<q', buf, end - 10)[0]
                             if 10_000 <= raw_cp <= 10_000_000:
                                 cp_val = int(raw_cp)
                         except Exception:
                             pass
-                        # Fallback inteligente: se end-10 não bateu, varre os últimos 36 bytes procurando combatPower
                         if cp_val == 0:
                             scan_limit = max(start + 16, end - 36)
                             for off in range(end - 8, scan_limit, -1):
@@ -929,15 +1018,18 @@ class PacketDispatcher:
                                         break
                                 except Exception:
                                     pass
-                    log(f"CharAppear_NT: Key={char_key}, Nick='{desc['nickname']}', Class={p_class}, CP={cp_val}")
-                    self.event_queue.put({
-                        "type":        "other_char",
-                        "key":         char_key,
-                        "name":        desc['nickname'],
-                        "pcId":        desc.get('pcId', 0),
-                        "class":       p_class,
-                        "combatPower": cp_val
-                    })
+
+                    if desc['nickname'] or dbid_val > 0:
+                        log(f"CharAppear_NT: Key={char_key}, DBID={dbid_val}, Nick='{desc['nickname']}', Class={p_class}, CP={cp_val}")
+                        self.event_queue.put({
+                            "type":        "other_char",
+                            "key":         char_key,
+                            "dbid":        dbid_val if dbid_val > 0 else 0,
+                            "name":        desc['nickname'] or "",
+                            "pcId":        pc_id,
+                            "class":       p_class,
+                            "combatPower": cp_val
+                        })
 
             # 3. CharCombatPowerUpdate_NT (13910): Combat Power do Jogador Local (Sempre 16 bytes: combatPower i64 + highestCombatPower i64)
             elif opcode == 13910:
@@ -1040,6 +1132,18 @@ class PacketDispatcher:
                     target_key = reader.vi32()
                     if target_key > 0:
                         self.event_queue.put({"type": "target_change", "target_key": target_key, "caster_key": entity_key})
+
+            # 5.2. PartySetTargetByBoss_NT (37408) & PartyDungeonRewardMiddleBossKill_NT (22318)
+            elif opcode == 37408:
+                if (from_lz4 or self.is_synced) and (end - start) <= 6:
+                    target_key = reader.vi32()
+                    if target_key > 0:
+                        self.event_queue.put({"type": "boss_target", "target_key": target_key})
+            elif opcode == 22318:
+                if (from_lz4 or self.is_synced) and (end - start) == 4:
+                    npc_id = reader.i32()
+                    if npc_id > 0:
+                        self.event_queue.put({"type": "dungeon_boss_killed", "npc_id": npc_id})
 
             # 6. SkillEffect_NT (14340): Dano Principal (Idêntico ao BT(e,t) do Questlog)
             elif opcode == 14340:
@@ -1353,6 +1457,75 @@ class PacketDispatcher:
                     if member_dbid > 0 and p_key > 0 and 0 <= reason <= 10:
                         log(f"ForceRemoveMember_NT: dbid={member_dbid}")
                         self.event_queue.put({"type": "party_remove_dbid", "dbid": member_dbid})
+
+            # 12.8. PartyFinderGroup_NT (38658) & PartyFinderJoin_NT (38667): Membros do Grupo Random / Matchmaking (Questlog j4 / U_)
+            elif opcode == 38658:
+                try:
+                    reader.i32(); reader.str(); reader.u8(); reader.i32()
+                    reader.u8(); reader.u8()
+                    reader.i64()  # leaderDbid
+                    reader.bool(); reader.u8(); reader.u8()
+                    m_cnt = reader.v32()
+                    members = []
+                    for _ in range(m_cnt):
+                        ut = reader.u8()
+                        reader.u8()  # number
+                        m_dbid = int(reader.i64())
+                        m_nick = reader.str()
+                        m_pcid = reader.i32()
+                        reader.i32(); reader.i32()  # level, equipItemLevel
+                        reader.bool()
+                        if ut & 2: reader.bool()
+                        if ut & 4: reader.u16(); reader.u16()
+                        reader.u8()
+                        m_cp = int(reader.i64())
+                        reader.u8()
+                        if ut & 16: reader.i64()
+                        reader.u8(); reader.u8()
+                        if m_dbid != 0 and m_nick and 1 <= m_pcid <= 60:
+                            members.append({
+                                "key":         0,
+                                "dbid":        m_dbid,
+                                "name":        m_nick,
+                                "pcId":        m_pcid,
+                                "class":       get_class_by_pcid(m_pcid),
+                                "combatPower": m_cp if m_cp > 0 else 0
+                            })
+                    if members:
+                        self.event_queue.put({"type": "party_finder_info", "members": members})
+                except Exception:
+                    pass
+
+            elif opcode == 38667:
+                try:
+                    ut = reader.u8()
+                    reader.u8()
+                    m_dbid = int(reader.i64())
+                    m_nick = reader.str()
+                    m_pcid = reader.i32()
+                    reader.i32(); reader.i32()
+                    reader.bool()
+                    if ut & 2: reader.bool()
+                    if ut & 4: reader.u16(); reader.u16()
+                    reader.u8()
+                    m_cp = int(reader.i64())
+                    reader.u8()
+                    if ut & 16: reader.i64()
+                    reader.u8(); reader.u8()
+                    if m_dbid != 0 and m_nick and 1 <= m_pcid <= 60:
+                        self.event_queue.put({
+                            "type": "party_add",
+                            "member": {
+                                "key":         0,
+                                "dbid":        m_dbid,
+                                "name":        m_nick,
+                                "pcId":        m_pcid,
+                                "class":       get_class_by_pcid(m_pcid),
+                                "combatPower": m_cp if m_cp > 0 else 0
+                            }
+                        })
+                except Exception:
+                    pass
 
             # 13. Saída / Desmanche / Kick do Grupo (Validação Estrita l.exact + Sincronia para evitar falsos positivos em combate)
             elif opcode in (37395, 37663, 37407, 37401, 38426, 38446):
@@ -1935,13 +2108,18 @@ class OverlayDPSMeter:
         self.player_identified  = False
         self.local_player_name  = "Aguardando identificar jogador"
         self.local_player_key   = None
+        self.local_dbid         = 0
         self.local_class        = None
         self.local_combat_power = 0
         self.current_map_id     = None
         self.account_characters = []
 
-        self.players_names = {}  # key -> name
-        self.players_info  = {}  # name -> {'class': str, 'combatPower': int, 'deaths': int}
+        self.players_names      = {}  # key -> name
+        self.players_by_dbid    = {}  # dbid -> name
+        self.dbid_to_key        = {}  # dbid -> entity key (CharAppear_NT / PartyInfo_NT)
+        self.key_to_char        = {}  # key -> {'dbid': int, 'name': str, 'class': str, 'combatPower': int}
+        self.provisional_keys   = set()  # keys associadas provisoriamente quando sk_id=0
+        self.players_info       = {}  # name -> {'class': str, 'combatPower': int, 'deaths': int}
         cfg = load_config()
         self.known_chars   = cfg.get("known_chars", {})
         known_chars        = self.known_chars
@@ -2337,6 +2515,8 @@ class OverlayDPSMeter:
     def _remember_player(self, name, p_class=None, cp=0, key=None, dbid=None):
         if not name or name in ("Você", "Aguardando Alvo", "Aguardando identificar jogador"):
             return
+        if dbid and int(dbid) > 0:
+            self.players_by_dbid[int(dbid)] = name
         if name not in self.players_info:
             self.players_info[name] = {}
         if p_class:
@@ -2877,22 +3057,71 @@ class OverlayDPSMeter:
 
     def _resolve_combatant(self, caster_key, sk_id):
         """
-        Resolve com precisão cirúrgica quem é o autor do ataque (jogador local vs membro da party/raid).
+        Resolve com precisão cirúrgica quem é o autor do ataque (jogador local vs membro da party/raid),
+        alinhado ao modelo de entidades do Questlog (combat.cjs A1 / k1).
         Garante que:
         1. Se outro membro atacar primeiro (ex: Tank/Glad puxando Boss), NÃO rouba a identidade do jogador local.
         2. Nenhum ataque de membro de grupo/raid é descartado por falta de mapeamento prévio de key.
-        3. Associa a key dinâmica ao membro da raid pela classe da habilidade utilizada.
+        3. Associa a key dinâmica ao membro da raid pela classe da habilidade utilizada (ou provisoriamente se sk_id=0, refinando no primeiro hit de classe).
         4. O jogador local NUNCA é adivinhado por aproximação ou histórico de outros players.
-           Aguarda estritamente o pacote de teleporte/mapa (MyCharAppear_NT) ou login (Login_RS).
         """
         # 0. Se o caster for um NPC registrado (e não o jogador local), NUNCA trata como jogador!
         if caster_key in self.npc_registry and caster_key != self.local_player_key:
             return None, False
 
+        sk_class = get_class_by_skill_id(sk_id) if sk_id else None
+
+        # 0.5. Refinamento de key provisória caso um membro tenha iniciado com ataque básico (sk_id=0)
+        # e agora utilize uma skill de classe específica:
+        if caster_key in self.provisional_keys and sk_class:
+            cur_name = self.players_names.get(caster_key)
+            cur_cls = None
+            if cur_name and cur_name in self.party_members:
+                cur_cls = self.party_members[cur_name].get("class")
+            elif cur_name and self.player_identified and self.local_player_name and cur_name.lower() == self.local_player_name.lower():
+                cur_cls = self.local_class
+            if cur_cls == sk_class:
+                self.provisional_keys.discard(caster_key)
+            elif cur_cls and cur_cls != sk_class and self.party_members:
+                for m_name, m_data in self.party_members.items():
+                    if m_data.get("class") == sk_class and (not m_data.get("key") or m_data.get("key") in self.provisional_keys):
+                        old_m_key = m_data.get("key")
+                        if cur_name in self.party_members:
+                            self.party_members[cur_name]["key"] = old_m_key if (old_m_key and old_m_key != caster_key) else 0
+                            if self.party_members[cur_name]["key"]:
+                                self.players_names[self.party_members[cur_name]["key"]] = cur_name
+                        if self.local_player_key == caster_key:
+                            self.local_player_key = None
+                        m_data["key"] = caster_key
+                        self.players_names[caster_key] = m_name
+                        self.provisional_keys.discard(caster_key)
+                        is_new_loc = bool(self.player_identified and self.local_player_name and m_name.lower() == self.local_player_name.lower())
+                        if is_new_loc:
+                            self.local_player_key = caster_key
+                        for c_k, c_entry in list(self.players_combat.items()):
+                            if c_entry.get("caster_key") == caster_key:
+                                self.players_combat.pop(c_k, None)
+                                new_k = "LOCAL" if is_new_loc else m_name
+                                c_entry["name"]        = self.local_player_name if is_new_loc else m_name
+                                c_entry["is_local"]    = is_new_loc
+                                c_entry["class"]       = sk_class
+                                c_entry["combatPower"] = self.local_combat_power if is_new_loc else (m_data.get("combatPower") or self.get_player_cp(m_name, caster_key))
+                                if new_k in self.players_combat:
+                                    self.players_combat[new_k]["damage"] += c_entry["damage"]
+                                    self.players_combat[new_k]["hits"]   += c_entry["hits"]
+                                    self.players_combat[new_k]["crits"]  += c_entry["crits"]
+                                else:
+                                    self.players_combat[new_k] = c_entry
+                                break
+                        break
+
         # 1. Já confirmado como jogador local?
         if self.local_player_key and caster_key == self.local_player_key:
             if not self.player_identified or self.local_player_name in (None, "", "Aguardando identificar jogador"):
-                if self.party_members:
+                if self.local_dbid and self.local_dbid in self.players_by_dbid:
+                    self.local_player_name = self.players_by_dbid[self.local_dbid]
+                    self.player_identified = True
+                if not self.player_identified and self.party_members:
                     unkeyed = [m for m, d in self.party_members.items() if not d.get("key") or d.get("key") == caster_key]
                     if unkeyed:
                         self.local_player_name = unkeyed[0]
@@ -2922,64 +3151,103 @@ class OverlayDPSMeter:
                     self.local_player_key = caster_key
                 return m_name, is_loc
 
-        # 4. Determina a classe da habilidade utilizada:
-        sk_class = get_class_by_skill_id(sk_id) if sk_id else None
-
-        # 5. Se o jogador local ainda não tem local_player_key:
-        if not self.local_player_key and self.local_class:
-            if sk_class and sk_class == self.local_class:
-                self.local_player_key = caster_key
-                if not self.player_identified or self.local_player_name in (None, "", "Aguardando identificar jogador"):
-                    if self.party_members:
-                        unkeyed = [m for m, d in self.party_members.items() if d.get("class") == self.local_class]
-                        if unkeyed:
-                            self.local_player_name = unkeyed[0]
+        # 4. Se o jogador local ainda não tem local_player_key (ou se a key antiga ficou obsoleta e ele ainda não pontuou nesta luta):
+        other_unkeyed_same_class = [
+            m_name for m_name, m_data in self.party_members.items()
+            if m_data.get("class") == self.local_class
+            and (not m_data.get("key") or m_data.get("key") in self.provisional_keys)
+            and (not self.player_identified or not self.local_player_name or m_name.lower() != self.local_player_name.lower())
+        ]
+        if self.local_class and sk_class and sk_class == self.local_class and (
+            not self.local_player_key
+            or ("LOCAL" not in self.players_combat and not other_unkeyed_same_class)
+        ):
+            self.local_player_key = caster_key
+            self.provisional_keys.discard(caster_key)
+            if not self.player_identified or self.local_player_name in (None, "", "Aguardando identificar jogador"):
+                if self.local_dbid and self.local_dbid in self.players_by_dbid:
+                    self.local_player_name = self.players_by_dbid[self.local_dbid]
+                    self.player_identified = True
+                elif self.party_members:
+                    unkeyed = [m for m, d in self.party_members.items() if d.get("class") == self.local_class]
+                    if unkeyed:
+                        self.local_player_name = unkeyed[0]
+                        self.player_identified = True
+                if not self.player_identified and self.known_chars:
+                    for kn, kd in self.known_chars.items():
+                        if isinstance(kd, dict) and kd.get("class") == self.local_class:
+                            self.local_player_name = kn
                             self.player_identified = True
-                    if not self.player_identified and self.known_chars:
-                        for kn, kd in self.known_chars.items():
-                            if isinstance(kd, dict) and kd.get("class") == self.local_class:
-                                self.local_player_name = kn
-                                self.player_identified = True
-                                break
-                if self.player_identified and self.local_player_name:
-                    self.players_names[caster_key] = self.local_player_name
-                    for m_name, m_data in self.party_members.items():
-                        if m_name.lower() == self.local_player_name.lower():
-                            m_data["key"] = caster_key
                             break
-                    log(f"[AutoID] Confirmado local_player_key={caster_key} para {self.local_player_name} via skill {sk_id} ({sk_class})")
-                    return self.local_player_name, True
+            if self.player_identified and self.local_player_name:
+                self.players_names[caster_key] = self.local_player_name
+                for m_name, m_data in self.party_members.items():
+                    if m_name.lower() == self.local_player_name.lower():
+                        m_data["key"] = caster_key
+                        break
+                log(f"[AutoID] Confirmado local_player_key={caster_key} para {self.local_player_name} via skill {sk_id} ({sk_class})")
+                return self.local_player_name, True
 
-        # 6. Associa a key a um membro da party/raid (da mesma classe e cuja key ainda seja 0):
+        # 5. Associa a key a um membro da party/raid:
         if self.party_members:
             if sk_class:
+                # 5a. Prioriza membros sem key (ou com key provisória) da mesma classe
                 unkeyed_members = [
                     (m_name, m_data) for m_name, m_data in self.party_members.items()
-                    if m_data.get("class") == sk_class and not m_data.get("key")
-                    and (not self.player_identified or not self.local_player_name or m_name.lower() != self.local_player_name.lower())
+                    if m_data.get("class") == sk_class and (not m_data.get("key") or m_data.get("key") in self.provisional_keys)
+                    and (not self.local_player_key or not self.player_identified or not self.local_player_name or m_name.lower() != self.local_player_name.lower())
                 ]
+                # 5b. Se todos já tinham key antiga mas algum membro dessa classe ainda não pontuou nesta luta (ex: reconectou/mudou de key):
+                if not unkeyed_members:
+                    unkeyed_members = [
+                        (m_name, m_data) for m_name, m_data in self.party_members.items()
+                        if m_data.get("class") == sk_class
+                        and m_name not in self.players_combat
+                        and (not self.local_player_key or not self.player_identified or not self.local_player_name or m_name.lower() != self.local_player_name.lower())
+                    ]
                 if unkeyed_members:
                     matched_name, m_data = unkeyed_members[0]
                     m_data["key"] = caster_key
+                    self.provisional_keys.discard(caster_key)
                     self.party_member_keys.add(caster_key)
                     self.players_names[caster_key] = matched_name
+                    is_loc = bool(self.player_identified and self.local_player_name and matched_name.lower() == self.local_player_name.lower())
+                    if is_loc and not self.local_player_key:
+                        self.local_player_key = caster_key
                     log(f"[RaidID] Associado membro da raid {matched_name} ({sk_class}) -> Key={caster_key}")
-                    return matched_name, False
+                    return matched_name, is_loc
             else:
-                # sk_class é None (ataque básico / auto-attack)
-                # Se restar apenas 1 membro da party sem key (ex: Prada), associa automaticamente!
-                unkeyed_members = [
+                # 5c. sk_class é None (ataque básico / auto-attack / Godstone / DoT)
+                # Associa a um membro sem key (provisoriamente se houver >1 sem key, garantindo que NENHUM hit no Boss seja perdido!)
+                unkeyed_non_local = [
                     (m_name, m_data) for m_name, m_data in self.party_members.items()
                     if not m_data.get("key")
                     and (not self.player_identified or not self.local_player_name or m_name.lower() != self.local_player_name.lower())
                 ]
-                if len(unkeyed_members) == 1:
-                    matched_name, m_data = unkeyed_members[0]
+                unkeyed_all = [
+                    (m_name, m_data) for m_name, m_data in self.party_members.items()
+                    if not m_data.get("key")
+                ]
+                candidates = unkeyed_non_local if (self.local_player_key or unkeyed_non_local) else unkeyed_all
+                if not candidates:
+                    # Se todos tinham keys antigas de fora da instância, verifica quem ainda não pontuou nesta luta:
+                    candidates = [
+                        (m_name, m_data) for m_name, m_data in self.party_members.items()
+                        if m_name not in self.players_combat
+                        and (not self.player_identified or not self.local_player_name or m_name.lower() != self.local_player_name.lower() or "LOCAL" not in self.players_combat)
+                    ]
+                if candidates:
+                    matched_name, m_data = candidates[0]
                     m_data["key"] = caster_key
+                    if len(candidates) > 1 or len(unkeyed_all) > 1:
+                        self.provisional_keys.add(caster_key)
                     self.party_member_keys.add(caster_key)
                     self.players_names[caster_key] = matched_name
-                    log(f"[RaidID] Associado membro único sem key {matched_name} -> Key={caster_key}")
-                    return matched_name, False
+                    is_loc = bool(self.player_identified and self.local_player_name and matched_name.lower() == self.local_player_name.lower())
+                    if is_loc and not self.local_player_key:
+                        self.local_player_key = caster_key
+                    log(f"[RaidID] Associado membro sem key {matched_name} -> Key={caster_key}")
+                    return matched_name, is_loc
 
         # 7. Se o jogador local ainda não foi identificado, NUNCA adivinha por combatentes próximos ou histórico.
         # Aguarda estritamente o teleporte ou login de personagem:
@@ -3052,34 +3320,25 @@ class OverlayDPSMeter:
             elif etype == "login_characters":
                 self.account_characters = evt.get("characters", [])
                 for c in self.account_characters:
-                    c_name = c["name"]
+                    c_name = c.get("name")
                     if c_name:
-                        if c_name not in self.players_info:
-                            self.players_info[c_name] = {}
-                        if c.get("class"):
-                            self.players_info[c_name]["class"] = c["class"]
-                        if c.get("key"):
-                            self.players_names[c["key"]] = c_name
+                        self._remember_player(c_name, c.get("class"), c.get("combatPower", 0), c.get("key", 0), c.get("dbid", 0))
 
-            # 0.4. Teleporte Concluído (CharWarpEnter_NT 14141 - Questlog 0.1.48)
-            elif etype == "warp_enter":
-                w_key = evt.get("key")
-                if w_key and (w_key == self.local_player_key or not self.local_player_key):
-                    if not self.local_player_key:
-                        self.local_player_key = w_key
-                        if self.local_player_name and self.local_player_name != "Aguardando identificar jogador":
-                            self.players_names[w_key] = self.local_player_name
-                    # Teleporte concluído: reseta métricas de combate e aguarda novo alvo!
-                    self.reset_metrics()
-
-            # 0.5. Mudança de Mapa / Entrada em Dungeon (PrepareEnterMap_NT 13857)
+            # 0.5. Mudança de Mapa / Entrada ou Saída de Dungeon (PrepareEnterMap_NT 13857)
             elif etype == "map_change":
                 new_map = evt.get("map_id")
+                # Idêntico ao Questlog (if (_.data.mapId === a) break;):
+                # Ignora recarregamento de sub-zona/cutscene dentro do MESMO mapa para não perder as keys da party!
+                if new_map is not None and self.current_map_id is not None and new_map == self.current_map_id:
+                    continue
                 self.current_map_id = new_map
                 # Limpa entidades do mapa anterior e redefine keys dinâmicas de instâncias
                 self.npc_registry.clear()
                 self.summon_owners.clear()
                 self.party_member_keys.clear()
+                self.provisional_keys.clear()
+                self.dbid_to_key.clear()
+                self.key_to_char.clear()
                 self.local_player_key = None
                 self.players_names.clear()
                 self.killed_boss_names.clear()
@@ -3106,7 +3365,11 @@ class OverlayDPSMeter:
             # 1. Próprio Personagem Local (Identificado ao mudar de mapa / carregar / entrar em Dungeon)
             elif etype == "my_char":
                 self.local_player_key = evt["key"]
+                self.provisional_keys.discard(self.local_player_key)
                 self.npc_registry.pop(self.local_player_key, None)
+                if evt.get("dbid"):
+                    self.local_dbid = int(evt["dbid"])
+                    self.dbid_to_key[self.local_dbid] = self.local_player_key
                 if evt.get("class"):
                     self.local_class = evt["class"]
                 if evt.get("combatPower", 0) > 0:
@@ -3116,10 +3379,15 @@ class OverlayDPSMeter:
                 p_name = None
                 if raw_nick and raw_nick != "Aguardando identificar jogador":
                     p_name = raw_nick
+                elif self.local_dbid and self.local_dbid in self.players_by_dbid:
+                    p_name = self.players_by_dbid[self.local_dbid]
                 elif self.player_identified and self.local_player_name and self.local_player_name != "Aguardando identificar jogador":
                     p_name = self.local_player_name
                 elif self.account_characters:
                     for ac in self.account_characters:
+                        if self.local_dbid and ac.get("dbid") == self.local_dbid:
+                            p_name = ac["name"]
+                            break
                         if evt.get("pcId") and ac.get("pcId") == evt.get("pcId"):
                             p_name = ac["name"]
                             break
@@ -3131,22 +3399,28 @@ class OverlayDPSMeter:
 
                 # Dedução inteligente caso o medidor tenha sido iniciado com o jogo já aberto:
                 if not p_name and self.party_members:
-                    matching_class_members = [
-                        m_name for m_name, m_data in self.party_members.items()
-                        if m_data.get("class") == self.local_class
-                    ]
-                    if len(matching_class_members) == 1:
-                        p_name = matching_class_members[0]
-                    elif len(matching_class_members) > 1 and self.local_combat_power > 0:
-                        matching_class_members.sort(key=lambda m: abs(self.party_members[m].get("combatPower", 0) - self.local_combat_power))
-                        p_name = matching_class_members[0]
-                    elif not matching_class_members:
-                        unkeyed = [
+                    if self.local_dbid:
+                        for m_name, m_data in self.party_members.items():
+                            if m_data.get("dbid") == self.local_dbid:
+                                p_name = m_name
+                                break
+                    if not p_name:
+                        matching_class_members = [
                             m_name for m_name, m_data in self.party_members.items()
-                            if not m_data.get("key") or m_data.get("key") == self.local_player_key
+                            if m_data.get("class") == self.local_class
                         ]
-                        if len(unkeyed) == 1:
-                            p_name = unkeyed[0]
+                        if len(matching_class_members) == 1:
+                            p_name = matching_class_members[0]
+                        elif len(matching_class_members) > 1 and self.local_combat_power > 0:
+                            matching_class_members.sort(key=lambda m: abs(self.party_members[m].get("combatPower", 0) - self.local_combat_power))
+                            p_name = matching_class_members[0]
+                        elif not matching_class_members:
+                            unkeyed = [
+                                m_name for m_name, m_data in self.party_members.items()
+                                if not m_data.get("key") or m_data.get("key") == self.local_player_key
+                            ]
+                            if len(unkeyed) == 1:
+                                p_name = unkeyed[0]
 
                 if not p_name and self.known_chars:
                     matching_known = [
@@ -3166,11 +3440,17 @@ class OverlayDPSMeter:
 
                     # Se já havia informações da party ou players_info, sincroniza CP/classe se disponível
                     for m_name, m_data in self.party_members.items():
-                        if m_name.lower() == self.local_player_name.lower() or (m_data.get("key") and m_data.get("key") == self.local_player_key):
+                        if (
+                            m_name.lower() == self.local_player_name.lower()
+                            or (self.local_dbid and m_data.get("dbid") == self.local_dbid)
+                            or (m_data.get("key") and m_data.get("key") == self.local_player_key)
+                        ):
                             m_data["key"] = self.local_player_key
+                            if self.local_dbid and not m_data.get("dbid"):
+                                m_data["dbid"] = self.local_dbid
                             if m_data.get("class"):
                                 self.local_class = m_data["class"]
-                            if m_data.get("combatPower", 0) > 0:
+                            if m_data.get("combatPower", 0) > 0 and self.local_combat_power <= 0:
                                 self.local_combat_power = m_data["combatPower"]
                             break
                     if self.local_combat_power <= 0:
@@ -3178,13 +3458,7 @@ class OverlayDPSMeter:
                             if p_n.lower() == self.local_player_name.lower() and p_inf.get("combatPower", 0) > 0:
                                 self.local_combat_power = p_inf["combatPower"]
                                 break
-                    if self.local_player_name not in self.players_info:
-                        self.players_info[self.local_player_name] = {}
-                    self.players_info[self.local_player_name]["class"] = self.local_class
-                    if self.local_combat_power > 0:
-                        self.players_info[self.local_player_name]["combatPower"] = self.local_combat_power
-                    save_known_char(self.local_player_name, self.local_class, self.local_combat_power)
-                    self.known_chars[self.local_player_name] = {"class": self.local_class, "combatPower": self.local_combat_power}
+                    self._remember_player(self.local_player_name, self.local_class, self.local_combat_power, self.local_player_key, self.local_dbid)
 
                     if "LOCAL" in self.players_combat:
                         self.players_combat["LOCAL"]["name"]        = self.local_player_name
@@ -3195,28 +3469,34 @@ class OverlayDPSMeter:
                     else:
                         needs_redraw = True
 
-            # 2. Outro Jogador (CharAppear_NT 13893)
+            # 2. Outro Jogador (CharAppear_NT 13893 - Questlog w4)
             elif etype == "other_char":
-                p_name = evt["name"]
+                p_name = (evt.get("name") or "").strip()
                 p_key  = evt["key"]
+                p_dbid = int(evt.get("dbid") or 0)
+                p_cls  = evt.get("class") or "gladiator"
+                cp_v   = int(evt.get("combatPower") or 0)
+
+                if p_key == self.local_player_key or (self.local_dbid and p_dbid == self.local_dbid):
+                    continue
+
                 self.npc_registry.pop(p_key, None)
-                if len(self.players_names) > 400:
-                    party_keys = {m_data.get("key"): m_name for m_name, m_data in self.party_members.items() if m_data.get("key")}
-                    self.players_names.clear()
-                    self.players_names.update(party_keys)
-                self.players_names[p_key] = p_name
-                p_cls = evt.get("class", "gladiator")
-                cp_v = evt.get("combatPower", 0)
+                self.provisional_keys.discard(p_key)
+                if p_dbid > 0:
+                    self.dbid_to_key[p_dbid] = p_key
+                    if not p_name and p_dbid in self.players_by_dbid:
+                        p_name = self.players_by_dbid[p_dbid]
 
-                # Memoriza classe, CP e key com persistência em config.json
-                self._remember_player(p_name, p_cls, cp_v, p_key)
-
-                # Atualiza sempre a key da entidade atual do membro do grupo (essencial quando spawna na Dungeon!)
+                # Se CharAppear_NT veio sem nickname ou com tag diferente, vincula pelo dbid da party!
                 matched_party = False
                 for m_name, m_data in self.party_members.items():
-                    if m_name.lower() == p_name.lower():
+                    if (p_dbid > 0 and m_data.get("dbid") == p_dbid) or (p_name and m_name.lower() == p_name.lower()):
                         matched_party = True
+                        if not p_name:
+                            p_name = m_name
                         m_data["key"] = p_key
+                        if p_dbid > 0:
+                            m_data["dbid"] = p_dbid
                         if p_cls:
                             m_data["class"] = p_cls
                         if cp_v > 0:
@@ -3224,11 +3504,35 @@ class OverlayDPSMeter:
                             if m_name in self.players_combat:
                                 self.players_combat[m_name]["combatPower"] = cp_v
                                 needs_redraw = True
+                        self.party_member_keys.add(p_key)
                         break
+
+                if not p_name and p_key in self.players_names:
+                    p_name = self.players_names[p_key]
+
+                self.key_to_char[p_key] = {
+                    "dbid":        p_dbid,
+                    "name":        p_name,
+                    "class":       p_cls,
+                    "combatPower": cp_v
+                }
+
+                if not p_name:
+                    continue
+
+                if len(self.players_names) > 1000:
+                    party_keys = {m_data.get("key"): m_name for m_name, m_data in self.party_members.items() if m_data.get("key")}
+                    self.players_names.clear()
+                    self.players_names.update(party_keys)
+                self.players_names[p_key] = p_name
+
+                # Memoriza classe, CP, key e dbid com persistência em config.json
+                self._remember_player(p_name, p_cls, cp_v, p_key, p_dbid)
+
                 if not matched_party and p_key in self.party_member_keys:
                     self.party_members[p_name] = {
                         "key":         p_key,
-                        "dbid":        0,
+                        "dbid":        p_dbid,
                         "class":       p_cls or "gladiator",
                         "combatPower": cp_v or self.get_player_cp(p_name, p_key),
                         "deaths":      0
@@ -3241,14 +3545,19 @@ class OverlayDPSMeter:
                         self.players_combat[p_name]["combatPower"] = cp_v
                         needs_redraw = True
 
-                # Se esse combatente estava registrado em players_combat com chave provisória (ex: Gladiator), renomeia:
+                # Se esse combatente estava registrado em players_combat com chave provisória, renomeia/mescla:
                 for c_k, c_data in list(self.players_combat.items()):
                     if c_k != "LOCAL" and c_data.get("caster_key") == p_key and c_k != p_name:
                         entry = self.players_combat.pop(c_k)
                         entry["name"] = p_name
                         if p_cls: entry["class"] = p_cls
                         if cp_v > 0: entry["combatPower"] = cp_v
-                        self.players_combat[p_name] = entry
+                        if p_name in self.players_combat:
+                            self.players_combat[p_name]["damage"] += entry["damage"]
+                            self.players_combat[p_name]["hits"]   += entry["hits"]
+                            self.players_combat[p_name]["crits"]  += entry["crits"]
+                        else:
+                            self.players_combat[p_name] = entry
                         needs_redraw = True
                         break
 
@@ -3258,10 +3567,7 @@ class OverlayDPSMeter:
                 if cp_v > 0:
                     self.local_combat_power = cp_v
                     if self.player_identified and self.local_player_name and self.local_player_name != "Aguardando identificar jogador":
-                        if self.local_player_name not in self.players_info:
-                            self.players_info[self.local_player_name] = {}
-                        self.players_info[self.local_player_name]["combatPower"] = cp_v
-                        save_known_char(self.local_player_name, self.local_class, self.local_combat_power)
+                        self._remember_player(self.local_player_name, self.local_class, self.local_combat_power, self.local_player_key, self.local_dbid)
                     if "LOCAL" in self.players_combat:
                         self.players_combat["LOCAL"]["combatPower"] = self.local_combat_power
                     if self.player_identified and not self.in_combat:
@@ -3278,57 +3584,107 @@ class OverlayDPSMeter:
                 self.party_members.clear()
                 for m in evt["members"]:
                     m_name = m["name"]
-                    m_cp   = m.get("combatPower", 0)
-                    m_key  = m.get("key") or prev_keys.get(m_name.lower(), 0)
+                    m_dbid = int(m.get("dbid") or 0)
+                    m_cp   = int(m.get("combatPower") or 0)
+                    m_key  = m.get("key") or (self.dbid_to_key.get(m_dbid, 0) if m_dbid else 0) or prev_keys.get(m_name.lower(), 0)
+                    if m_key and m_key in self.key_to_char and m_cp <= 0:
+                        m_cp = self.key_to_char[m_key].get("combatPower", 0)
                     if m_key:
                         self.players_names[m_key] = m_name
                         self.npc_registry.pop(m_key, None)
-                    self._remember_player(m_name, m.get("class"), m_cp, m_key, m.get("dbid"))
+                        self.provisional_keys.discard(m_key)
+                    self._remember_player(m_name, m.get("class"), m_cp, m_key, m_dbid)
                     self.party_members[m_name] = {
                         "key":         m_key,
-                        "dbid":        m.get("dbid", 0),
+                        "dbid":        m_dbid,
                         "class":       m["class"],
                         "combatPower": m_cp or self.get_player_cp(m_name, m_key),
                         "deaths":      0
                     }
-                    if self.player_identified and (
-                        m_name.lower() == self.local_player_name.lower()
-                        or (self.local_player_key and m_key == self.local_player_key)
-                    ):
+                    is_loc_member = bool(
+                        (self.local_dbid and m_dbid == self.local_dbid)
+                        or (self.player_identified and m_name.lower() == self.local_player_name.lower())
+                        or (self.local_player_key and m_key and m_key == self.local_player_key)
+                    )
+                    if is_loc_member:
+                        if not self.player_identified and m_name:
+                            self.local_player_name = m_name
+                            self.player_identified = True
+                        if m_key and not self.local_player_key:
+                            self.local_player_key = m_key
+                        if m_dbid and not self.local_dbid:
+                            self.local_dbid = m_dbid
                         if m.get("class"):
                             self.local_class = m["class"]
                         if m_cp > 0:
                             self.local_combat_power = m_cp
                             save_known_char(self.local_player_name, self.local_class, self.local_combat_power)
                         if "LOCAL" in self.players_combat:
+                            self.players_combat["LOCAL"]["name"]        = self.local_player_name
                             self.players_combat["LOCAL"]["class"]       = self.local_class
                             self.players_combat["LOCAL"]["combatPower"] = self.local_combat_power
-                    elif m_name in self.players_combat and m_cp > 0:
-                        self.players_combat[m_name]["combatPower"] = m_cp
+                    else:
+                        if m_key:
+                            self.party_member_keys.add(m_key)
+                        if m_name in self.players_combat and m_cp > 0:
+                            self.players_combat[m_name]["combatPower"] = m_cp
                 self._prune_non_party_combatants()
 
-            # 5. Membro Adicionado ao Grupo (PartyAddMember_NT / ForceAddMember_NT)
+            # 4.5. Informações de Party Finder / Matchmaking (PartyFinderGroup_NT 38658)
+            elif etype == "party_finder_info":
+                for m in evt["members"]:
+                    m_name = m["name"]
+                    m_dbid = int(m.get("dbid") or 0)
+                    m_cp   = int(m.get("combatPower") or 0)
+                    m_cls  = m.get("class") or "gladiator"
+                    existing = self.party_members.get(m_name, {})
+                    m_key  = existing.get("key") or (self.dbid_to_key.get(m_dbid, 0) if m_dbid else 0)
+                    if m_key:
+                        self.players_names[m_key] = m_name
+                        self.npc_registry.pop(m_key, None)
+                    self._remember_player(m_name, m_cls, m_cp, m_key, m_dbid)
+                    self.party_members[m_name] = {
+                        "key":         m_key,
+                        "dbid":        m_dbid or existing.get("dbid", 0),
+                        "class":       m_cls,
+                        "combatPower": m_cp or existing.get("combatPower", 0) or self.get_player_cp(m_name, m_key),
+                        "deaths":      existing.get("deaths", 0)
+                    }
+
+            # 5. Membro Adicionado ou Reconectado ao Grupo (PartyAddMember_NT / PartyReconnectMember_NT / ForceAdd / ForceReconnect)
             elif etype == "party_add":
                 m = evt["member"]
                 m_name = m["name"]
-                m_cp   = m.get("combatPower", 0)
-                m_key  = m.get("key", 0)
+                m_dbid = int(m.get("dbid") or 0)
+                m_cp   = int(m.get("combatPower") or 0)
+                m_key  = m.get("key", 0) or (self.dbid_to_key.get(m_dbid, 0) if m_dbid else 0)
                 if not m_key:
                     for k_id, k_name in self.players_names.items():
                         if k_name and k_name.lower() == m_name.lower():
                             m_key = k_id
                             break
+                if m_key and m_key in self.key_to_char and m_cp <= 0:
+                    m_cp = self.key_to_char[m_key].get("combatPower", 0)
                 if m_key:
                     self.players_names[m_key] = m_name
                     self.npc_registry.pop(m_key, None)
-                self._remember_player(m_name, m.get("class"), m_cp, m_key, m.get("dbid"))
+                    self.provisional_keys.discard(m_key)
+                self._remember_player(m_name, m.get("class"), m_cp, m_key, m_dbid)
                 self.party_members[m_name] = {
                     "key":         m_key,
-                    "dbid":        m.get("dbid", 0),
+                    "dbid":        m_dbid,
                     "class":       m["class"],
                     "combatPower": m_cp or self.get_player_cp(m_name, m_key),
                     "deaths":      0
                 }
+                is_loc_member = bool(
+                    (self.local_dbid and m_dbid == self.local_dbid)
+                    or (self.player_identified and m_name.lower() == self.local_player_name.lower())
+                )
+                if is_loc_member and m_key:
+                    self.local_player_key = m_key
+                elif m_key:
+                    self.party_member_keys.add(m_key)
                 if m_name in self.players_combat and m_cp > 0:
                     self.players_combat[m_name]["combatPower"] = m_cp
                     needs_redraw = True
@@ -3413,23 +3769,25 @@ class OverlayDPSMeter:
                 parent_key = evt.get("parent_key", 0)
                 if parent_key > 0:
                     # É um Summon / Totem / Espírito / Pet de jogador! Mapeia para o dono (ownerOf no Questlog)
-                    if len(self.summon_owners) > 500:
+                    if len(self.summon_owners) > 1000:
                         self.summon_owners.clear()
                     self.summon_owners[evt["key"]] = parent_key
                     continue
 
                 # Nunca registra um jogador como NPC (idêntico a if (t.has(g.entity)) break; do Questlog)
-                if evt["key"] == self.local_player_key or evt["key"] in self.players_names:
+                if evt["key"] == self.local_player_key or evt["key"] in self.players_names or evt["key"] in self.party_member_keys:
                     continue
 
-                if len(self.npc_registry) > 400:
-                    active_npc = self.npc_registry.get(self.active_target_key)
-                    self.npc_registry.clear()
-                    if active_npc and self.active_target_key is not None:
-                        self.npc_registry[self.active_target_key] = active_npc
+                # Capacidade de 4096 NPCs (idêntica a ei = 4096 no Questlog combat.cjs), preservando todos os Bosses!
+                if len(self.npc_registry) >= 4096:
+                    for old_k, old_v in list(self.npc_registry.items()):
+                        if not old_v.get("is_boss") and old_k != self.active_target_key and old_k != self.active_boss_key:
+                            del self.npc_registry[old_k]
+                            if len(self.npc_registry) < 3500:
+                                break
 
                 b_ms = evt.get("berserk_ms", 0)
-                is_b = evt.get("is_boss", False) or is_real_boss_npc(evt.get("npc_id", 0), evt.get("name", ""), self.current_map_id)
+                is_b = evt.get("is_boss", False) or (b_ms > 0) or is_real_boss_npc(evt.get("npc_id", 0), evt.get("name", ""), self.current_map_id)
                 self.npc_registry[evt["key"]] = {
                     "name":       evt["name"],
                     "npc_id":     evt["npc_id"],
@@ -3450,6 +3808,28 @@ class OverlayDPSMeter:
                         self.active_target_berserk_epoch = self._compute_berserk_epoch(b_ms)
                     needs_redraw = True
 
+            # 8.1. Alvo de Boss Oficial da Party (PartySetTargetByBoss_NT 37408) & Boss Intermediário Morto (22318)
+            elif etype == "boss_target":
+                b_key = evt.get("target_key", 0)
+                if b_key and b_key != self.local_player_key and b_key not in self.players_names and b_key not in self.party_member_keys:
+                    if b_key not in self.npc_registry:
+                        self.npc_registry[b_key] = {
+                            "name":       "",
+                            "npc_id":     0,
+                            "is_boss":    True,
+                            "hp":         None,
+                            "hp_max":     0,
+                            "berserk_ms": 0,
+                            "in_combat":  True
+                        }
+                    else:
+                        self.npc_registry[b_key]["is_boss"] = True
+            elif etype == "dungeon_boss_killed":
+                b_npc_id = evt.get("npc_id", 0)
+                b_name = get_boss_name(b_npc_id)
+                if b_name:
+                    self.killed_boss_names.add(b_name)
+
             # 8.2. Atualização de HP Real do Servidor (CharPointUpdate_NT 36096)
             elif etype == "hp_update":
                 ekey = evt["key"]
@@ -3467,12 +3847,34 @@ class OverlayDPSMeter:
                                 needs_redraw = True
                     continue
 
-                if ekey in self.npc_registry:
-                    if hp_v is not None: self.npc_registry[ekey]["hp"] = hp_v
-                    if hm_v is not None and hm_v > 0: self.npc_registry[ekey]["hp_max"] = hm_v
+                if ekey not in self.npc_registry:
+                    self.npc_registry[ekey] = {
+                        "name":       "",
+                        "npc_id":     0,
+                        "is_boss":    bool((hm_v or 0) >= 5_000_000 or (hp_v or 0) >= 5_000_000),
+                        "hp":         hp_v,
+                        "hp_max":     hm_v or (hp_v or 0),
+                        "berserk_ms": 0,
+                        "in_combat":  True
+                    }
+                else:
+                    if hp_v is not None:
+                        self.npc_registry[ekey]["hp"] = hp_v
+                    if hm_v is not None and hm_v > 0:
+                        self.npc_registry[ekey]["hp_max"] = hm_v
+                    elif hp_v is not None and hp_v > 0:
+                        dealt_so_far = self.encounter_targets.get(ekey, 0)
+                        if (self.npc_registry[ekey].get("hp_max") or 0) < (hp_v + dealt_so_far):
+                            self.npc_registry[ekey]["hp_max"] = hp_v + dealt_so_far
+                    if (self.npc_registry[ekey].get("hp_max") or 0) >= 5_000_000:
+                        self.npc_registry[ekey]["is_boss"] = True
+
                 if ekey == self.active_target_key or ekey == self.active_boss_key:
                     if hm_v is not None and hm_v > 0:
                         self.active_target_max_hp = hm_v
+                    elif hp_v is not None and hp_v > 0:
+                        dealt_so_far = self.encounter_targets.get(ekey, 0)
+                        self.active_target_max_hp = max(self.active_target_max_hp or 0, hp_v + dealt_so_far)
                     if hp_v is not None:
                         self.active_target_cur_hp = hp_v
                         if hp_v <= 0 and self.in_combat:
@@ -3496,9 +3898,22 @@ class OverlayDPSMeter:
             elif etype == "combat_state":
                 ekey = evt["key"]
                 b_ms = evt.get("berserk_ms", 0)
-                if ekey in self.npc_registry:
-                    self.npc_registry[ekey]["in_combat"]  = evt["in_combat"]
-                    self.npc_registry[ekey]["berserk_ms"] = b_ms if evt["in_combat"] else 0
+                if ekey != self.local_player_key and ekey not in self.players_names and ekey not in self.party_member_keys:
+                    if ekey not in self.npc_registry:
+                        self.npc_registry[ekey] = {
+                            "name":       "",
+                            "npc_id":     0,
+                            "is_boss":    (b_ms > 0),
+                            "hp":         None,
+                            "hp_max":     0,
+                            "berserk_ms": b_ms if evt["in_combat"] else 0,
+                            "in_combat":  evt["in_combat"]
+                        }
+                    else:
+                        self.npc_registry[ekey]["in_combat"]  = evt["in_combat"]
+                        self.npc_registry[ekey]["berserk_ms"] = b_ms if evt["in_combat"] else 0
+                        if b_ms > 0:
+                            self.npc_registry[ekey]["is_boss"] = True
                 if ekey == self.active_target_key or ekey == self.active_boss_key:
                     if evt["in_combat"] and b_ms > 0:
                         self.active_target_berserk_ms    = b_ms
@@ -3661,9 +4076,9 @@ class OverlayDPSMeter:
 
                 self.encounter_targets[target_key] = self.encounter_targets.get(target_key, 0) + dmg
 
-                # Subtrai o dano do HP atual do monstro (caso CharPointUpdate_NT não venha a cada hit)
-                if target_npc and target_npc.get("hp") is not None:
-                    target_npc["hp"] = max(0, target_npc["hp"] - dmg)
+                # Subtrai o dano do HP atual do monstro apenas se mantiver HP > 0 (a morte/HP=0 vem de CharPointUpdate_NT ou CharDie_NT)
+                if target_npc and target_npc.get("hp") is not None and target_npc["hp"] > dmg:
+                    target_npc["hp"] = target_npc["hp"] - dmg
 
                 # Atualiza o alvo principal exibido no cabeçalho do HUD (Questlog tP):
                 # Se houver boss na luta, o foco permanece estritamente no Boss ativo (ignora adds/totens no cabeçalho)
@@ -3871,22 +4286,27 @@ class OverlayDPSMeter:
             pct = 0
             ratio = 0.0
         else:
-            # Se active_target_max_hp ainda não foi capturado, estima pelo HP atual + dano total causado
-            if (not self.active_target_max_hp or self.active_target_max_hp <= 0) and self.in_combat:
-                if self.active_target_cur_hp is not None and self.active_target_cur_hp > 0:
-                    self.active_target_max_hp = max(total_dmg, self.active_target_cur_hp + total_dmg)
-                elif total_dmg > 0:
-                    self.active_target_max_hp = max(10_000_000, total_dmg * 2)
+            # Enquanto o alvo está VIVO (!is_dead), garante que max_hp acompanhe cur_hp + total_dmg
+            # e que rem_hp seja sempre > 0 para que o TTK (💀 M:SS) NUNCA suma durante a luta do Boss!
+            if self.active_target_cur_hp is not None and self.active_target_cur_hp > 0:
+                eff_max_hp = max(self.active_target_max_hp or 0, self.active_target_cur_hp + total_dmg)
+                self.active_target_max_hp = eff_max_hp
+                rem_hp = self.active_target_cur_hp
+            elif self.active_target_max_hp and self.active_target_max_hp > total_dmg:
+                eff_max_hp = self.active_target_max_hp
+                rem_hp = eff_max_hp - total_dmg
+            elif self.in_combat and total_dmg > 0:
+                eff_max_hp = max(self.active_target_max_hp or 0, 10_000_000, int(total_dmg * 1.35))
+                rem_hp = max(1, eff_max_hp - total_dmg)
+            else:
+                eff_max_hp = self.active_target_max_hp or 0
+                rem_hp = eff_max_hp
 
-            if self.active_target_max_hp and self.active_target_max_hp > 0:
-                if self.active_target_cur_hp is not None and self.active_target_cur_hp >= 0:
-                    rem_hp = max(0, min(self.active_target_max_hp, self.active_target_cur_hp))
-                else:
-                    rem_hp = max(0, self.active_target_max_hp - total_dmg)
-                pct = int((rem_hp / self.active_target_max_hp) * 100)
-                ratio = max(0.0, min(1.0, rem_hp / self.active_target_max_hp))
+            if eff_max_hp > 0 and rem_hp > 0:
+                pct = max(1, min(100, int((rem_hp / eff_max_hp) * 100)))
+                ratio = max(0.02, min(1.0, rem_hp / eff_max_hp))
                 # Calcula TTK (Tempo estimado para o Boss morrer no DPS atual do grupo/solo)
-                if self.in_combat and dur >= 1.0 and party_dps > 0 and rem_hp > 0:
+                if self.in_combat and dur >= 1.0 and party_dps > 0:
                     ttk_sec = int(math.ceil(rem_hp / party_dps))
             else:
                 pct = 100
@@ -4011,18 +4431,8 @@ class OverlayDPSMeter:
         top_dmg         = sorted_players[0]["damage"] or 1
         total_party_dmg = sum(p["damage"] for p in sorted_players) or 1
 
-        # Base de cálculo da porcentagem (%) idêntica ao Questlog (combat.cjs gk / vk: bossHpBasis ?? t.damage):
-        # Quando o alvo principal recebeu >= 90% do dano do encontro e possui HP máximo conhecido,
-        # a % de cada jogador é calculada sobre max(bossMaxHp, total_party_dmg).
-        main_target_dmg = self.encounter_targets.get(self.active_target_key, 0)
-        if (
-            self.active_target_max_hp
-            and self.active_target_max_hp > 0
-            and main_target_dmg >= total_party_dmg * 0.9
-        ):
-            share_basis = max(self.active_target_max_hp, total_party_dmg)
-        else:
-            share_basis = total_party_dmg
+        # Base de cálculo da porcentagem (%) idêntica ao Questlog (combat.cjs share: Ue(n.damage, t.damage)):
+        share_basis = total_party_dmg
 
         for i in range(num_bars):
             row     = self.rows[i]
