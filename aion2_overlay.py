@@ -719,6 +719,7 @@ class PacketDispatcher:
         self.buffer            = bytearray()
         self.is_synced         = False
         self.current_party_key = 0
+        self.current_map_id    = None
 
     def push(self, data_chunk):
         if not data_chunk: return
@@ -867,6 +868,7 @@ class PacketDispatcher:
                 reader.str()
                 reader.u8()
                 if map_id > 0:
+                    self.current_map_id = map_id
                     self.event_queue.put({"type": "map_change", "map_id": map_id})
 
             # 1. MyCharAppear_NT (13875): Próprio Jogador (Idêntico ao A4 do Questlog)
@@ -1077,7 +1079,7 @@ class PacketDispatcher:
                         berserk_ms = struct.unpack_from('<q', buf, tail_offset)[0]
                 npc_id = desc['pcId']
                 npc_name = get_boss_name(npc_id) or get_npc_name_by_id(npc_id) or f"Monstro #{npc_id}"
-                is_b = is_real_boss_npc(npc_id, npc_name)
+                is_b = is_real_boss_npc(npc_id, npc_name, self.current_map_id)
                 self.event_queue.put({
                     "type":       "npc_spawn",
                     "key":        npc_key,
@@ -2669,7 +2671,7 @@ class OverlayDPSMeter:
 
         return 0
 
-    def _remember_player(self, name, p_class=None, cp=0, key=None, dbid=None):
+    def _remember_player(self, name, p_class=None, cp=0, key=None, dbid=None, is_party_or_local=False):
         if not name or name in ("Você", "Aguardando Alvo", "Aguardando identificar jogador"):
             return
         if dbid and int(dbid) > 0:
@@ -2680,7 +2682,8 @@ class OverlayDPSMeter:
             self.players_info[name]["class"] = p_class
         if cp and cp > 0:
             self.players_info[name]["combatPower"] = int(cp)
-            save_known_char(name, p_class or self.players_info[name].get("class"), int(cp))
+            if is_party_or_local:
+                save_known_char(name, p_class or self.players_info[name].get("class"), int(cp))
             if not isinstance(self.known_chars, dict):
                 self.known_chars = {}
             if name not in self.known_chars:
@@ -2767,6 +2770,13 @@ class OverlayDPSMeter:
                         self.local_combat_power = p_inf["combatPower"]
                     break
             save_known_char(self.local_player_name, self.local_class, self.local_combat_power)
+            save_config({
+                "last_local_player": {
+                    "name": self.local_player_name,
+                    "class": self.local_class or "templar",
+                    "combatPower": self.local_combat_power
+                }
+            })
             if not self.in_combat:
                 self.show_standby_local_player()
 
@@ -3357,15 +3367,9 @@ class OverlayDPSMeter:
                     self.player_identified = True
                 if not self.player_identified and self.party_members:
                     unkeyed = [m for m, d in self.party_members.items() if not d.get("key") or d.get("key") == caster_key]
-                    if unkeyed:
+                    if len(unkeyed) == 1:
                         self.local_player_name = unkeyed[0]
                         self.player_identified = True
-                if not self.player_identified and self.known_chars:
-                    for kn, kd in self.known_chars.items():
-                        if isinstance(kd, dict) and kd.get("class") == self.local_class:
-                            self.local_player_name = kn
-                            self.player_identified = True
-                            break
             return self.local_player_name, True
 
         # 2. Já mapeado em players_names?
@@ -3404,15 +3408,9 @@ class OverlayDPSMeter:
                     self.player_identified = True
                 elif self.party_members:
                     unkeyed = [m for m, d in self.party_members.items() if d.get("class") == self.local_class]
-                    if unkeyed:
+                    if len(unkeyed) == 1:
                         self.local_player_name = unkeyed[0]
                         self.player_identified = True
-                if not self.player_identified and self.known_chars:
-                    for kn, kd in self.known_chars.items():
-                        if isinstance(kd, dict) and kd.get("class") == self.local_class:
-                            self.local_player_name = kn
-                            self.player_identified = True
-                            break
             if self.player_identified and self.local_player_name:
                 self.players_names[caster_key] = self.local_player_name
                 for m_name, m_data in self.party_members.items():
@@ -3656,16 +3654,14 @@ class OverlayDPSMeter:
                             if len(unkeyed) == 1:
                                 p_name = unkeyed[0]
 
-                if not p_name and self.known_chars:
-                    matching_known = [
-                        k_name for k_name, k_data in self.known_chars.items()
-                        if isinstance(k_data, dict) and k_data.get("class") == self.local_class
-                    ]
-                    if len(matching_known) == 1:
-                        p_name = matching_known[0]
-                    elif len(matching_known) > 1 and self.local_combat_power > 0:
-                        matching_known.sort(key=lambda k: abs(self.known_chars[k].get("combatPower", 0) - self.local_combat_power))
-                        p_name = matching_known[0]
+                # Fallback estrito: apenas o último jogador local confirmado pelo usuário ou login (nunca estranhos do mundo)
+                if not p_name:
+                    last_lp = load_config().get("last_local_player")
+                    if isinstance(last_lp, dict) and last_lp.get("name"):
+                        if not self.local_class or last_lp.get("class") == self.local_class:
+                            p_name = last_lp["name"]
+                            if self.local_combat_power <= 0 and last_lp.get("combatPower", 0) > 0:
+                                self.local_combat_power = int(last_lp["combatPower"])
 
                 if p_name:
                     self.local_player_name = p_name
@@ -3692,7 +3688,14 @@ class OverlayDPSMeter:
                             if p_n.lower() == self.local_player_name.lower() and p_inf.get("combatPower", 0) > 0:
                                 self.local_combat_power = p_inf["combatPower"]
                                 break
-                    self._remember_player(self.local_player_name, self.local_class, self.local_combat_power, self.local_player_key, self.local_dbid)
+                    self._remember_player(self.local_player_name, self.local_class, self.local_combat_power, self.local_player_key, self.local_dbid, is_party_or_local=True)
+                    save_config({
+                        "last_local_player": {
+                            "name": self.local_player_name,
+                            "class": self.local_class or "templar",
+                            "combatPower": self.local_combat_power
+                        }
+                    })
 
                     if "LOCAL" in self.players_combat:
                         self.players_combat["LOCAL"]["name"]        = self.local_player_name
@@ -3760,8 +3763,9 @@ class OverlayDPSMeter:
                     self.players_names.update(party_keys)
                 self.players_names[p_key] = p_name
 
-                # Memoriza classe, CP, key e dbid com persistência em config.json
-                self._remember_player(p_name, p_cls, cp_v, p_key, p_dbid)
+                # Memoriza classe, CP, key e dbid (apenas persiste no config se for membro do grupo ou jogador local)
+                is_part = bool(matched_party or p_key in self.party_member_keys or (self.local_player_name and p_name.lower() == self.local_player_name.lower()))
+                self._remember_player(p_name, p_cls, cp_v, p_key, p_dbid, is_party_or_local=is_part)
 
                 if not matched_party and p_key in self.party_member_keys:
                     self.party_members[p_name] = {
@@ -3802,7 +3806,14 @@ class OverlayDPSMeter:
                 if cp_v > 0:
                     self.local_combat_power = cp_v
                     if self.player_identified and self.local_player_name and self.local_player_name != "Aguardando identificar jogador":
-                        self._remember_player(self.local_player_name, self.local_class, self.local_combat_power, self.local_player_key, self.local_dbid)
+                        self._remember_player(self.local_player_name, self.local_class, self.local_combat_power, self.local_player_key, self.local_dbid, is_party_or_local=True)
+                        save_config({
+                            "last_local_player": {
+                                "name": self.local_player_name,
+                                "class": self.local_class or "templar",
+                                "combatPower": self.local_combat_power
+                            }
+                        })
                     if "LOCAL" in self.players_combat:
                         self.players_combat["LOCAL"]["combatPower"] = self.local_combat_power
                     if self.player_identified and not self.in_combat:
@@ -3828,7 +3839,7 @@ class OverlayDPSMeter:
                         self.players_names[m_key] = m_name
                         self.npc_registry.pop(m_key, None)
                         self.provisional_keys.discard(m_key)
-                    self._remember_player(m_name, m.get("class"), m_cp, m_key, m_dbid)
+                    self._remember_player(m_name, m.get("class"), m_cp, m_key, m_dbid, is_party_or_local=True)
                     self.party_members[m_name] = {
                         "key":         m_key,
                         "dbid":        m_dbid,
@@ -3838,11 +3849,11 @@ class OverlayDPSMeter:
                     }
                     is_loc_member = bool(
                         (self.local_dbid and m_dbid == self.local_dbid)
-                        or (self.player_identified and m_name.lower() == self.local_player_name.lower())
+                        or (self.player_identified and self.local_player_name and m_name.lower() == self.local_player_name.lower())
                         or (self.local_player_key and m_key and m_key == self.local_player_key)
                     )
                     if is_loc_member:
-                        if not self.player_identified and m_name:
+                        if m_name and m_name != "Aguardando identificar jogador":
                             self.local_player_name = m_name
                             self.player_identified = True
                         if m_key and not self.local_player_key:
@@ -3854,6 +3865,13 @@ class OverlayDPSMeter:
                         if m_cp > 0:
                             self.local_combat_power = m_cp
                             save_known_char(self.local_player_name, self.local_class, self.local_combat_power)
+                            save_config({
+                                "last_local_player": {
+                                    "name": self.local_player_name,
+                                    "class": self.local_class or "templar",
+                                    "combatPower": self.local_combat_power
+                                }
+                            })
                         if "LOCAL" in self.players_combat:
                             self.players_combat["LOCAL"]["name"]        = self.local_player_name
                             self.players_combat["LOCAL"]["class"]       = self.local_class
@@ -3877,7 +3895,7 @@ class OverlayDPSMeter:
                     if m_key:
                         self.players_names[m_key] = m_name
                         self.npc_registry.pop(m_key, None)
-                    self._remember_player(m_name, m_cls, m_cp, m_key, m_dbid)
+                    self._remember_player(m_name, m_cls, m_cp, m_key, m_dbid, is_party_or_local=True)
                     self.party_members[m_name] = {
                         "key":         m_key,
                         "dbid":        m_dbid or existing.get("dbid", 0),
@@ -3904,7 +3922,7 @@ class OverlayDPSMeter:
                     self.players_names[m_key] = m_name
                     self.npc_registry.pop(m_key, None)
                     self.provisional_keys.discard(m_key)
-                self._remember_player(m_name, m.get("class"), m_cp, m_key, m_dbid)
+                self._remember_player(m_name, m.get("class"), m_cp, m_key, m_dbid, is_party_or_local=True)
                 self.party_members[m_name] = {
                     "key":         m_key,
                     "dbid":        m_dbid,
@@ -3960,7 +3978,7 @@ class OverlayDPSMeter:
                         if m_data.get("dbid") and m_data["dbid"] == evt["dbid"]:
                             matched = True
                             m_data["combatPower"] = cp_v
-                            self._remember_player(m_name, cp=cp_v, dbid=evt["dbid"])
+                            self._remember_player(m_name, cp=cp_v, dbid=evt["dbid"], is_party_or_local=True)
                             if self.player_identified and m_name.lower() == self.local_player_name.lower():
                                 self.local_combat_power = cp_v
                                 if "LOCAL" in self.players_combat:
@@ -3976,7 +3994,7 @@ class OverlayDPSMeter:
                             if m_data.get("class") == p_cls and m_data.get("combatPower", 0) == 0:
                                 m_data["dbid"] = evt["dbid"]
                                 m_data["combatPower"] = cp_v
-                                self._remember_player(m_name, p_cls, cp=cp_v, dbid=evt["dbid"])
+                                self._remember_player(m_name, p_cls, cp=cp_v, dbid=evt["dbid"], is_party_or_local=True)
                                 if m_name in self.players_combat:
                                     self.players_combat[m_name]["combatPower"] = cp_v
                                     needs_redraw = True
@@ -4210,11 +4228,23 @@ class OverlayDPSMeter:
                         continue
 
                 # 10.5 Controle de Luta Congelada / Início e Reset de Encontro (Idêntico ao Questlog combat.cjs k1)
+                is_dungeon = bool(self.current_map_id and (self.current_map_id in DUNGEON_BOSSES or self.current_map_id >= 600000))
+                if target_key not in self.npc_registry:
+                    self.npc_registry[target_key] = {
+                        "name": "Chefe" if is_dungeon else "Monstro",
+                        "npc_id": 0,
+                        "is_boss": is_dungeon,
+                        "hp": None,
+                        "hp_max": 0,
+                        "berserk_ms": 0,
+                        "in_combat": True
+                    }
                 target_npc = self.npc_registry.get(target_key)
                 target_is_boss = bool(
                     (target_npc and (target_npc.get("is_boss") or is_real_boss_npc(target_npc.get("npc_id", 0), target_npc.get("name", ""), self.current_map_id)))
                     or target_key in self.encounter_boss_keys
                     or target_key == self.active_boss_key
+                    or is_dungeon
                 )
                 if not target_is_boss and target_npc and target_npc.get("berserk_ms", 0) > 0:
                     target_is_boss = True
