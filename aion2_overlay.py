@@ -110,29 +110,39 @@ except Exception:
         def is_boss(npc_id, dungeon_id=None): return False
         def get_boss_name(npc_id): return ""
 
-def is_real_boss_npc(npc_id, npc_name="", map_id=None):
+_REAL_BOSS_NAMES_SET = set()
+_REAL_BOSS_NAMES_LOWER = set()
+
+def _refresh_boss_name_sets():
+    global _REAL_BOSS_NAMES_SET, _REAL_BOSS_NAMES_LOWER
+    _REAL_BOSS_NAMES_SET = set(v for v in BOSS_NAMES.values() if v)
+    _REAL_BOSS_NAMES_LOWER = set(v.strip().lower() for v in _REAL_BOSS_NAMES_SET if v)
+
+def is_real_boss_npc(npc_id=0, npc_name="", map_id=None):
     """Verifica se o NPC é um Boss real (ignorando objetos invisíveis/mecânicas/totens)."""
-    if not npc_id:
-        return False
-    name_check = npc_name or get_boss_name(npc_id) or ""
+    name_check = (npc_name or (get_boss_name(npc_id) if npc_id else "") or "").strip()
     if name_check:
         low_n = name_check.lower()
         bad_tokens = (
             "invisible", "m_pd_", "n_invisible", "test_", "poison fluid",
-            "thorn vines", "thorn root", "surveillance device", "hydraulic press"
+            "thorn vines", "thorn root", "surveillance device", "hydraulic press", "sandback"
         )
         if any(bt in low_n for bt in bad_tokens):
             return False
-    if map_id and map_id in DUNGEON_BOSSES:
-        if npc_id in DUNGEON_BOSSES[map_id]:
+        if low_n in _REAL_BOSS_NAMES_LOWER or name_check in _REAL_BOSS_NAMES_SET:
             return True
-    if is_boss(npc_id, map_id):
-        return True
-    if name_check and name_check in _REAL_BOSS_NAMES_SET:
-        return True
+    if npc_id:
+        if map_id and map_id in DUNGEON_BOSSES:
+            if npc_id in DUNGEON_BOSSES[map_id]:
+                return True
+        if is_boss(npc_id, map_id):
+            return True
+        b_name = BOSS_NAMES.get(npc_id)
+        if b_name:
+            low_b = b_name.strip().lower()
+            if not any(bt in low_b for bt in ("invisible", "m_pd_", "test_", "sandback")):
+                return True
     return False
-
-_REAL_BOSS_NAMES_SET = frozenset(v for v in BOSS_NAMES.values() if v)
 
 def _load_dynamic_game_data():
     for p in [
@@ -155,6 +165,7 @@ def _load_dynamic_game_data():
                 break
             except Exception:
                 pass
+    _refresh_boss_name_sets()
 _load_dynamic_game_data()
 QUESTLOG_NPCS_FILE   = os.path.join(DATA_DIR, "questlog_npcs.json")
 ALETHEIA_DIR         = os.path.join(BUNDLE_DIR, "AION2-DPS-Meter", "data") if os.path.exists(os.path.join(BUNDLE_DIR, "AION2-DPS-Meter", "data")) else os.path.join(BASE_DIR, "AION2-DPS-Meter", "data")
@@ -2171,6 +2182,8 @@ class PillRenderer:
 # INTERFACE GRÁFICA OVERLAY DPS METER (FLUTUANTE)
 # ─────────────────────────────────────────────
 class OverlayDPSMeter:
+    boss_only = True
+
     def __init__(self, root):
         # 1. Janela Principal Nativa (1x1 Offscreen) -> Garante ícone 100% nativo na Barra de Tarefas do Windows 11
         #    com suporte a "Fechar janela" pelo botão direito na Barra de Tarefas, sem qualquer piscada (flicker)!
@@ -2272,6 +2285,7 @@ class OverlayDPSMeter:
         self.encounter_has_boss      = False
         self.encounter_boss_keys     = set()
         self.active_boss_key         = None
+        self.boss_only               = cfg.get("boss_only", True)
         self.combat_frozen           = False
         self.killed_boss_names       = set()
         self.player_dead_state       = {}   # name_lower -> {'is_dead': bool, 'last_death_t': float, 'deaths': int}
@@ -2297,6 +2311,7 @@ class OverlayDPSMeter:
         self._press_root_x = 0
         self._press_root_y = 0
 
+        self.btns_boss  = []
         self.btns_mode  = []
         self.btns_pause = []
         self.btns_lock  = []
@@ -2474,10 +2489,10 @@ class OverlayDPSMeter:
     def _show_hover_controls(self, show):
         if show and not self.is_hovered:
             self.is_hovered = True
-            self.hover_frame.place(x=HUD_WIDTH - 120, y=2, width=116, height=22)
+            self.hover_frame.place(x=HUD_WIDTH - 144, y=2, width=140, height=22)
             self.hover_frame.lift()
             if hasattr(self, "bg_hover_frame") and self.bg_hover_frame:
-                self.bg_hover_frame.place(x=HUD_WIDTH - 120, y=2, width=116, height=22)
+                self.bg_hover_frame.place(x=HUD_WIDTH - 144, y=2, width=140, height=22)
                 self.bg_hover_frame.lift()
             self.monster_canvas.itemconfigure(self.m_info_txt, state="hidden")
             if hasattr(self, "m_ttd_txt"):
@@ -2761,8 +2776,23 @@ class OverlayDPSMeter:
     def on_hover_leave(self, event=None):
         self.root.after(120, self._sync_hover_and_click_through)
 
+    def toggle_boss_only(self):
+        self.boss_only = not self.boss_only
+        cfg = load_config()
+        cfg["boss_only"] = self.boss_only
+        save_config(cfg)
+        icon = "👑" if self.boss_only else "🎯"
+        color = "#f59e0b" if self.boss_only else "#94a3b8"
+        for b in self.btns_boss:
+            try:
+                b.config(text=icon, fg=color)
+            except Exception:
+                pass
+        if self.boss_only and not self.encounter_has_boss and not self.active_boss_key:
+            self.reset_metrics()
+
     def _populate_control_buttons(self, parent_frame):
-        """Cria os 5 botões de controle (📊 🔄 ⏸ 🔓 ✕) em ambos os layers para garantir clique 100% confiável."""
+        """Cria os 6 botões de controle (👑/🎯 📊 🔄 ⏸ 🔓 ✕) em ambos os layers para garantir clique 100% confiável."""
         def _bind_btn(btn, callback):
             def _on_press(e):
                 callback()
@@ -2770,6 +2800,16 @@ class OverlayDPSMeter:
             btn.bind("<ButtonPress-1>", _on_press)
             btn.bind("<ButtonRelease-1>", lambda e: "break")
             btn.bind("<Enter>", self.on_hover_enter)
+
+        boss_icon = "👑" if self.boss_only else "🎯"
+        boss_color = "#f59e0b" if self.boss_only else "#94a3b8"
+        b_boss = tk.Label(
+            parent_frame, text=boss_icon, fg=boss_color, bg="#18141a",
+            font=("Segoe UI", 9, "bold"), cursor="hand2", padx=3
+        )
+        b_boss.pack(side=tk.LEFT)
+        _bind_btn(b_boss, self.toggle_boss_only)
+        self.btns_boss.append(b_boss)
 
         b_mode = tk.Label(
             parent_frame, text="📊", fg="#38bdf8", bg="#18141a",
@@ -4073,20 +4113,12 @@ class OverlayDPSMeter:
                     if hp_v is not None:
                         self.active_target_cur_hp = hp_v
                         if hp_v <= 0 and self.in_combat:
-                            self.target_is_dead       = True
-                            self.combat_frozen        = True
-                            self.active_target_cur_hp = 0
-                            if self.active_target_name and self.active_target_name not in ("Monstro", "Chefe", "Nenhum alvo"):
-                                self.killed_boss_names.add(self.active_target_name)
-                        elif (
-                            self.in_combat
-                            and not self.combat_frozen
-                            and self.encounter_targets.get(ekey, 0) > 0
-                            and self.active_target_max_hp
-                            and hp_v >= self.active_target_max_hp
-                        ):
-                            # Boss resetou o HP para 100% após um Wipe: congela a luta imediatamente (Questlog wipe)!
-                            self.combat_frozen = True
+                            if not self.encounter_has_boss or ekey == self.active_boss_key:
+                                self.target_is_dead       = True
+                                self.combat_frozen        = True
+                                self.active_target_cur_hp = 0
+                                if self.active_target_name and self.active_target_name not in ("Monstro", "Chefe", "Nenhum alvo"):
+                                    self.killed_boss_names.add(self.active_target_name)
                     needs_redraw = True
 
             # 8.5. Estado de Combate do Boss / Enrage Timer Oficial (CombatStateUpdate_NT 36129)
@@ -4116,10 +4148,6 @@ class OverlayDPSMeter:
                     elif not evt["in_combat"]:
                         self.active_target_berserk_ms    = 0
                         self.active_target_berserk_epoch = None
-                        # Se o Boss/alvo principal saiu de combate após ter recebido dano (Wipe da PT ou Reset):
-                        # Congela o encontro imediatamente (idêntico a I("wipe", P.at) no Questlog combat.cjs)!
-                        if self.in_combat and not self.combat_frozen and self.encounter_targets.get(ekey, 0) > 0:
-                            self.combat_frozen = True
                     needs_redraw = True
 
             # 9. Troca de Alvo do Jogador
@@ -4186,10 +4214,22 @@ class OverlayDPSMeter:
                 target_is_boss = bool(
                     (target_npc and (target_npc.get("is_boss") or is_real_boss_npc(target_npc.get("npc_id", 0), target_npc.get("name", ""), self.current_map_id)))
                     or target_key in self.encounter_boss_keys
+                    or target_key == self.active_boss_key
                 )
                 if not target_is_boss and target_npc and target_npc.get("berserk_ms", 0) > 0:
                     target_is_boss = True
                     target_npc["is_boss"] = True
+
+                # SE O MODO "SÓ BOSS" ESTIVER ATIVO:
+                if self.boss_only:
+                    # Se não estamos em luta de boss ativa e o alvo NÃO é um Boss:
+                    # Ignora completamente mobs comuns/trash mobs para não poluir o medidor
+                    if not self.encounter_has_boss and not target_is_boss:
+                        continue
+                    # Se a luta anterior de Boss já foi finalizada (boss morreu ou congelado) e o alvo NÃO é boss:
+                    # Mantém o relatório do Boss na tela, ignorando adds residuais ou trash a caminho do próximo boss
+                    if (self.combat_frozen or self.target_is_dead) and not target_is_boss:
+                        continue
 
                 # Quando não há luta ativa ou a luta anterior já terminou (Boss morreu / Wipe congelado):
                 # Ignora ticks residuais de DoT, hits <= 10 (Questlog eN = 10), hits no próprio alvo morto,
@@ -4211,16 +4251,18 @@ class OverlayDPSMeter:
                 if not self.in_combat:
                     new_encounter = True
                 elif self.combat_frozen or self.target_is_dead:
-                    # Luta anterior já estava encerrada/congelada (morte do boss/mob ou wipe) e um novo alvo vivo foi atacado!
-                    new_encounter = True
+                    # Luta anterior já estava encerrada/congelada (morte do boss/mob ou wipe) e um novo alvo vivo foi atacado
+                    if not self.boss_only or target_is_boss:
+                        new_encounter = True
                 elif self.last_hit_t and (hit_t - self.last_hit_t) > idle_timeout:
-                    # Inatividade (15s trash / 90s boss): fecha encontro anterior e abre novo
-                    new_encounter = True
+                    # Inatividade prolongada (15s trash / 90s boss): fecha encontro anterior e abre novo
+                    if not self.boss_only or target_is_boss:
+                        new_encounter = True
                 elif target_is_boss and not self.encounter_has_boss:
                     # Transição de trash para Boss: fecha a luta de trash e inicia o Boss isolado
                     new_encounter = True
                 elif target_is_boss and self.active_boss_key and target_key != self.active_boss_key:
-                    # Transição de um Boss A para um Boss B diferente:
+                    # Transição de um Boss A para um Boss B diferente (apenas se Boss A morreu ou ficou inativo > 12s)
                     prev_boss = self.npc_registry.get(self.active_boss_key)
                     if not prev_boss or prev_boss.get("hp", 1) <= 0 or not prev_boss.get("in_combat", True) or (self.last_hit_t and (hit_t - self.last_hit_t) > 12.0):
                         new_encounter = True
@@ -4237,21 +4279,7 @@ class OverlayDPSMeter:
                     self.target_is_dead      = False
                     self.combat_frozen       = False
                     self.active_target_key   = target_key
-                    t_name = (target_npc.get("name") if target_npc else None)
-                    if not t_name or t_name in ("Monstro", "Chefe"):
-                        if self.current_map_id and self.current_map_id in DUNGEON_BOSSES:
-                            d_boss_ids = DUNGEON_BOSSES[self.current_map_id]
-                            remaining = [
-                                get_boss_name(bid) for bid in d_boss_ids
-                                if get_boss_name(bid) and get_boss_name(bid) not in self.killed_boss_names
-                            ]
-                            if remaining:
-                                if len(self.killed_boss_names) >= 1:
-                                    t_name = remaining[-1]
-                                else:
-                                    t_name = remaining[0]
-                                target_is_boss = True
-                                self.encounter_has_boss = True
+                    t_name = (target_npc.get("name") if target_npc else None) or (get_boss_name(target_npc.get("npc_id", 0)) if target_npc else None)
                     if not t_name:
                         t_name = "Chefe" if target_is_boss else "Monstro"
                     self.active_target_name          = t_name
@@ -4267,7 +4295,8 @@ class OverlayDPSMeter:
                 if target_is_boss:
                     self.encounter_has_boss = True
                     self.encounter_boss_keys.add(target_key)
-                    self.active_boss_key = target_key
+                    if not self.active_boss_key or self.active_boss_key == target_key:
+                        self.active_boss_key = target_key
 
                 self.encounter_targets[target_key] = self.encounter_targets.get(target_key, 0) + dmg
 
@@ -4293,23 +4322,6 @@ class OverlayDPSMeter:
                     if main_npc.get("berserk_ms"):
                         self.active_target_berserk_ms    = main_npc["berserk_ms"]
                         self.active_target_berserk_epoch = self._compute_berserk_epoch(self.active_target_berserk_ms)
-
-                # Se o alvo ativo ainda estiver genérico ("Monstro" ou "Chefe"), recupera o nome da dungeon atual:
-                if (not self.active_target_name or self.active_target_name in ("Monstro", "Chefe")) and self.current_map_id and self.current_map_id in DUNGEON_BOSSES:
-                    d_boss_ids = DUNGEON_BOSSES[self.current_map_id]
-                    remaining = [
-                        get_boss_name(bid) for bid in d_boss_ids
-                        if get_boss_name(bid) and get_boss_name(bid) not in self.killed_boss_names
-                    ]
-                    if remaining:
-                        if len(self.killed_boss_names) >= 1:
-                            self.active_target_name = remaining[-1]
-                        else:
-                            self.active_target_name = remaining[0]
-                        self.encounter_has_boss = True
-                        if main_npc:
-                            main_npc["name"] = self.active_target_name
-                            main_npc["is_boss"] = True
 
                 self.last_hit_t = hit_t
 
@@ -4393,33 +4405,36 @@ class OverlayDPSMeter:
 
                 dead_npc = self.npc_registry.get(dead_key)
                 dead_is_boss = bool(
-                    (dead_npc and dead_npc.get("is_boss"))
+                    (dead_npc and (dead_npc.get("is_boss") or is_real_boss_npc(dead_npc.get("npc_id", 0), dead_npc.get("name", ""), self.current_map_id)))
                     or dead_key == self.active_boss_key
                     or dead_key in getattr(self, "encounter_boss_keys", ())
                 )
 
-                if dead_is_boss or (not self.encounter_has_boss and dead_key == self.active_target_key):
-                    # Se foi NpcDisappear_NT (despawn) de um Boss que ainda tinha muito HP (>10%), é reset/wipe ou fase, não kill:
-                    if is_despawn and dead_is_boss and dead_npc and dead_npc.get("hp_max", 0) > 0:
-                        cur_h = dead_npc.get("hp")
-                        if cur_h is not None and cur_h > dead_npc["hp_max"] * 0.10:
-                            self.combat_frozen = True
-                            needs_redraw = True
-                            continue
-                    # Boss morreu (ou mob trash único morreu):
+                if self.encounter_has_boss:
+                    # Durante um encontro de Boss, APENAS a morte do Boss principal encerra a luta!
+                    if dead_is_boss and dead_key == self.active_boss_key:
+                        if dead_npc:
+                            dead_npc["hp"]        = 0
+                            dead_npc["in_combat"] = False
+                        self.target_is_dead       = True
+                        self.combat_frozen        = True
+                        self.active_target_cur_hp = 0
+                        if self.active_target_name and self.active_target_name not in ("Monstro", "Chefe", "Nenhum alvo"):
+                            self.killed_boss_names.add(self.active_target_name)
+                        needs_redraw = True
+                    elif dead_key in self.npc_registry:
+                        # Morte de um add / lacaio / spider durante a luta de boss:
+                        # APENAS zera o HP do add. NUNCA congela ou encerra a luta do Boss!
+                        self.npc_registry[dead_key]["hp"] = 0
+                elif not self.boss_only and dead_key == self.active_target_key:
+                    # Em modo normal (fora de boss_only), mob trash comum morreu:
                     if dead_npc:
                         dead_npc["hp"]        = 0
                         dead_npc["in_combat"] = False
                     self.target_is_dead       = True
                     self.combat_frozen        = True
                     self.active_target_cur_hp = 0
-                    if self.active_target_name and self.active_target_name not in ("Monstro", "Chefe", "Nenhum alvo"):
-                        self.killed_boss_names.add(self.active_target_name)
                     needs_redraw = True
-                elif dead_key in self.npc_registry:
-                    # Apenas um add / minion / lacaio morreu durante a luta do Boss:
-                    # NÃO encerra o encontro! Apenas zera o HP do add.
-                    self.npc_registry[dead_key]["hp"] = 0
 
         # Salva config.json no disco com debouncing (apenas fora de combate e quando houver alterações)
         if not self.in_combat:
