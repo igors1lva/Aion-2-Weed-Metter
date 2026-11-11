@@ -767,6 +767,8 @@ class PacketDispatcher:
                 if st["ooo_bytes"] > 524288 or (time.time() - st["gap_since"] > 1.0):
                     min_seq = min(st["ooo"].keys(), key=lambda s: _seq_diff(s, st["next_seq"]))
                     st["next_seq"] = min_seq
+                    st["buf"].clear()
+                    st["synced"] = False
 
             while st["ooo"]:
                 ready = [s for s in st["ooo"] if _seq_diff(s, st["next_seq"]) <= 0]
@@ -792,25 +794,105 @@ class PacketDispatcher:
     def _process_buf(self, buf, synced):
         pos = 0
         buf_len = len(buf)
+        first_incomplete = None
+        last_valid_end = 0
 
         while pos < buf_len:
             res = get_packet_length(buf, pos, buf_len)
+            if not synced:
+                if res is None:
+                    if first_incomplete is None:
+                        first_incomplete = pos
+                    pos += 1
+                    continue
+                pkt_len, vlen = res
+                if pkt_len < 0:
+                    pos += 1
+                    continue
+                if pos + pkt_len > buf_len:
+                    if first_incomplete is None:
+                        first_incomplete = pos
+                    pos += 1
+                    continue
+
+                body_start = pos + vlen + 2
+                body_end   = pos + pkt_len
+                opcode = buf[pos + vlen] | (buf[pos + vlen + 1] << 8)
+
+                if opcode == 65535:
+                    bundle_ok = False
+                    if body_end - body_start > 4:
+                        decomp_size = struct.unpack_from('<I', buf, body_start)[0]
+                        if 0 < decomp_size <= 262144:
+                            try:
+                                decomp = lz4.block.decompress(
+                                    memoryview(buf)[body_start + 4 : body_end],
+                                    uncompressed_size=decomp_size
+                                )
+                                self.is_synced = False
+                                if self.parse_payload_packets(decomp):
+                                    synced = True
+                                    bundle_ok = True
+                            except Exception:
+                                bundle_ok = False
+                    if bundle_ok:
+                        pos += pkt_len
+                        last_valid_end = pos
+                        first_incomplete = None
+                        continue
+                    pos += 1
+                    continue
+
+                if pos + pkt_len + 3 <= buf_len:
+                    nxt = get_packet_length(buf, pos + pkt_len, buf_len)
+                    if nxt is not None and nxt[0] > 0:
+                        synced = True
+                        if opcode in HANDLED_OPCODES:
+                            self.is_synced = True
+                            self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False)
+                        pos += pkt_len
+                        last_valid_end = pos
+                        first_incomplete = None
+                        continue
+                    pos += 1
+                    continue
+
+                if opcode in HANDLED_OPCODES:
+                    self.is_synced = False
+                    self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False)
+                    pos += pkt_len
+                    last_valid_end = pos
+                    first_incomplete = None
+                    continue
+
+                if first_incomplete is None:
+                    first_incomplete = pos
+                pos += 1
+                continue
+
+            # Quando já está sincronizado (synced == True):
             if res is None:
                 break
             pkt_len, vlen = res
             if pkt_len < 0:
                 synced = False
+                first_incomplete = None
                 pos += 1
                 continue
             if pos + pkt_len > buf_len:
+                if buf_len - pos > 65536:
+                    synced = False
+                    first_incomplete = None
+                    pos += 1
+                    continue
                 break
 
             body_start = pos + vlen + 2
             body_end   = pos + pkt_len
-
             opcode = buf[pos + vlen] | (buf[pos + vlen + 1] << 8)
 
             if opcode == 65535:  # 0xFFFF = LZ4 Bundle
+                bundle_ok = False
                 if body_end - body_start > 4:
                     decomp_size = struct.unpack_from('<I', buf, body_start)[0]
                     if 0 < decomp_size <= 262144:
@@ -820,20 +902,39 @@ class PacketDispatcher:
                                 uncompressed_size=decomp_size
                             )
                             self.is_synced = synced
-                            self.parse_payload_packets(decomp)
-                            synced = True
+                            if self.parse_payload_packets(decomp):
+                                synced = True
+                                bundle_ok = True
                         except Exception:
-                            pass
+                            bundle_ok = False
+                if not bundle_ok:
+                    synced = False
+                    first_incomplete = None
+                    pos += 1
+                    continue
                 pos += pkt_len
+                last_valid_end = pos
                 continue
             elif opcode in HANDLED_OPCODES:
                 self.is_synced = synced
                 self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False)
 
             pos += pkt_len
+            last_valid_end = pos
 
-        if pos > 0:
-            del buf[:pos]
+        if synced:
+            if pos > 0:
+                del buf[:pos]
+        else:
+            keep_from = (
+                first_incomplete
+                if (first_incomplete is not None and first_incomplete >= last_valid_end)
+                else last_valid_end
+            )
+            if keep_from > 0:
+                del buf[:keep_from]
+            if len(buf) > 65536:
+                del buf[:len(buf) - 65536]
         return synced
 
     def parse_payload_packets(self, payload):
@@ -842,17 +943,17 @@ class PacketDispatcher:
         while pos < p_len:
             res = get_packet_length(payload, pos, p_len)
             if res is None:
-                break
+                return False
             pkt_len, vlen = res
             if pkt_len <= 0 or pos + pkt_len > p_len:
-                break
+                return False
             body_start = pos + vlen + 2
             body_end   = pos + pkt_len
             opcode = payload[pos + vlen] | (payload[pos + vlen + 1] << 8)
             if opcode in HANDLED_OPCODES:
                 self.dispatch_packet(opcode, payload, body_start, body_end, from_lz4=True)
             pos += pkt_len
-        return True
+        return pos == p_len
 
     def dispatch_packet(self, opcode, buf, start, end, from_lz4=False):
         if opcode not in HANDLED_OPCODES:
@@ -3651,6 +3752,18 @@ class OverlayDPSMeter:
             self.show_standby_local_player()
 
     def update_loop(self):
+        try:
+            self._update_loop_tick()
+        except Exception as ex:
+            now_err = time.time()
+            if now_err - getattr(self, "_last_loop_err_t", 0.0) > 5.0:
+                self._last_loop_err_t = now_err
+                log(f"[UI] Erro recuperado no update_loop: {ex}")
+        finally:
+            if getattr(self, "root", None):
+                self.root.after(120, self.update_loop)
+
+    def _update_loop_tick(self):
         now = time.time()
         needs_redraw = False
 
@@ -4193,22 +4306,9 @@ class OverlayDPSMeter:
                         self.active_target_berserk_epoch = self._compute_berserk_epoch(b_ms)
                     needs_redraw = True
 
-            # 8.1. Alvo de Boss Oficial da Party (PartySetTargetByBoss_NT 37408) & Boss Intermediário Morto (22318)
+            # 8.1. PartySetTargetByBoss_NT (37408) traz o targetKey do JOGADOR alvejado pelo Boss (aggro), NÃO do Boss!
             elif etype == "boss_target":
-                b_key = evt.get("target_key", 0)
-                if b_key and b_key != self.local_player_key and b_key not in self.players_names and b_key not in self.party_member_keys:
-                    if b_key not in self.npc_registry:
-                        self.npc_registry[b_key] = {
-                            "name":       "",
-                            "npc_id":     0,
-                            "is_boss":    True,
-                            "hp":         None,
-                            "hp_max":     0,
-                            "berserk_ms": 0,
-                            "in_combat":  True
-                        }
-                    else:
-                        self.npc_registry[b_key]["is_boss"] = True
+                pass
             elif etype == "dungeon_boss_killed":
                 b_npc_id = evt.get("npc_id", 0)
                 b_name = get_boss_name(b_npc_id)
@@ -4232,11 +4332,13 @@ class OverlayDPSMeter:
                                 needs_redraw = True
                     continue
 
+                is_dungeon_map = bool(self.current_map_id and (self.current_map_id in DUNGEON_BOSSES or self.current_map_id >= 600000))
+                boss_hp_threshold = 1_800_000 if is_dungeon_map else 5_000_000
                 if ekey not in self.npc_registry:
                     self.npc_registry[ekey] = {
                         "name":       "",
                         "npc_id":     0,
-                        "is_boss":    bool((hm_v or 0) >= 5_000_000 or (hp_v or 0) >= 5_000_000),
+                        "is_boss":    bool((hm_v or 0) >= boss_hp_threshold or (hp_v or 0) >= boss_hp_threshold),
                         "hp":         hp_v,
                         "hp_max":     hm_v or (hp_v or 0),
                         "berserk_ms": 0,
@@ -4251,7 +4353,7 @@ class OverlayDPSMeter:
                         dealt_so_far = self.encounter_targets.get(ekey, 0)
                         if (self.npc_registry[ekey].get("hp_max") or 0) < (hp_v + dealt_so_far):
                             self.npc_registry[ekey]["hp_max"] = hp_v + dealt_so_far
-                    if (self.npc_registry[ekey].get("hp_max") or 0) >= 5_000_000:
+                    if (self.npc_registry[ekey].get("hp_max") or 0) >= boss_hp_threshold:
                         self.npc_registry[ekey]["is_boss"] = True
 
                 if ekey == self.active_target_key or ekey == self.active_boss_key:
@@ -4263,12 +4365,35 @@ class OverlayDPSMeter:
                     if hp_v is not None:
                         self.active_target_cur_hp = hp_v
                         if hp_v <= 0 and self.in_combat:
-                            if not self.encounter_has_boss or ekey == self.active_boss_key:
+                            if ekey == self.active_boss_key:
                                 self.target_is_dead       = True
                                 self.combat_frozen        = True
                                 self.active_target_cur_hp = 0
                                 if self.active_target_name and self.active_target_name not in ("Monstro", "Chefe", "Nenhum alvo"):
                                     self.killed_boss_names.add(self.active_target_name)
+                            elif not self.encounter_has_boss:
+                                # Se outro alvo do mesmo pull ainda estiver vivo, troca o foco sem congelar o pull no meio!
+                                next_alive = None
+                                for tk, tdmg in sorted(self.encounter_targets.items(), key=lambda kv: kv[1], reverse=True):
+                                    if tk == ekey:
+                                        continue
+                                    t_info = self.npc_registry.get(tk)
+                                    if t_info and (t_info.get("hp") is None or t_info.get("hp") > 0):
+                                        next_alive = tk
+                                        break
+                                if next_alive is not None:
+                                    self.active_target_key = next_alive
+                                    n_info = self.npc_registry.get(next_alive, {})
+                                    if n_info.get("name"):
+                                        self.active_target_name = n_info["name"]
+                                    self.active_target_cur_hp = n_info.get("hp")
+                                    self.active_target_max_hp = n_info.get("hp_max") or 0
+                                else:
+                                    self.target_is_dead       = True
+                                    self.combat_frozen        = True
+                                    self.active_target_cur_hp = 0
+                                    if self.active_target_name and self.active_target_name not in ("Monstro", "Chefe", "Nenhum alvo"):
+                                        self.killed_boss_names.add(self.active_target_name)
                     needs_redraw = True
 
             # 8.5. Estado de Combate do Boss / Enrage Timer Oficial (CombatStateUpdate_NT 36129)
@@ -4402,9 +4527,10 @@ class OverlayDPSMeter:
                 if not self.in_combat or self.combat_frozen or self.target_is_dead:
                     if over_time or dmg <= 10:
                         continue
-                    if self.target_is_dead and target_key == self.active_target_key:
+                    target_hp_now = target_npc.get("hp") if target_npc else None
+                    if self.target_is_dead and target_key == self.active_target_key and (target_hp_now is None or target_hp_now <= 0):
                         continue
-                    if target_npc and target_npc.get("hp") is not None and target_npc.get("hp") <= 0 and target_key in self.encounter_targets:
+                    if target_hp_now is not None and target_hp_now <= 0 and target_key in self.encounter_targets:
                         continue
                     if (self.combat_frozen or self.target_is_dead) and self.encounter_has_boss and not target_is_boss:
                         if self.last_hit_t and (hit_t - self.last_hit_t) < 3.0:
@@ -4575,6 +4701,13 @@ class OverlayDPSMeter:
                     continue
 
                 dead_npc = self.npc_registry.get(dead_key)
+                if is_despawn:
+                    # NpcDisappear_NT (13890) indica apenas saída de alcance / transição de fase / teleporte:
+                    # NUNCA congela a luta ou zera o HP como se fosse morte real!
+                    if dead_npc:
+                        dead_npc["in_combat"] = False
+                    continue
+
                 dead_is_boss = bool(
                     (dead_npc and (dead_npc.get("is_boss") or is_real_boss_npc(dead_npc.get("npc_id", 0), dead_npc.get("name", ""), self.current_map_id)))
                     or dead_key == self.active_boss_key
@@ -4636,8 +4769,6 @@ class OverlayDPSMeter:
                 if self.view_mode == "SKILLS" and self._has_pending_skill_icons and not ICON_MGR.downloading:
                     if self.in_combat and self.combat_start:
                         self.render_skills(self._get_fight_duration())
-
-        self.root.after(120, self.update_loop)
 
     def _update_target_label(self, is_dead=False, dur=None):
         total_dmg = sum(p["damage"] for p in self.players_combat.values())
