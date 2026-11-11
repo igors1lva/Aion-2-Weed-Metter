@@ -198,7 +198,17 @@ def load_config():
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
+                    had_stale = any(k in data for k in ("known_chars", "last_local_player", "local_player"))
+                    data.pop("known_chars", None)
+                    data.pop("last_local_player", None)
+                    data.pop("local_player", None)
                     _CONFIG_CACHE = data
+                    if had_stale:
+                        try:
+                            with open(CONFIG_FILE, "w", encoding="utf-8") as wf:
+                                json.dump(data, wf, indent=2, ensure_ascii=False)
+                        except Exception:
+                            pass
                     return _CONFIG_CACHE
         except Exception:
             pass
@@ -209,7 +219,8 @@ def save_config(cfg):
     global _CONFIG_CACHE, _KNOWN_CHARS_DIRTY
     cur = load_config()
     cur.update(cfg)
-    cur.pop("local_player", None)
+    for k in ("local_player", "last_local_player", "known_chars"):
+        cur.pop(k, None)
     _CONFIG_CACHE = cur
     _KNOWN_CHARS_DIRTY = True
     flush_config_to_disk(force=True)
@@ -225,37 +236,16 @@ def flush_config_to_disk(force=False):
     _KNOWN_CHARS_DIRTY = False
     try:
         cur = dict(_CONFIG_CACHE)
-        cur.pop("local_player", None)
+        for k in ("local_player", "last_local_player", "known_chars"):
+            cur.pop(k, None)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cur, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
 
 def save_known_char(name, p_class=None, cp_val=0):
-    global _CONFIG_CACHE, _KNOWN_CHARS_DIRTY
-    if not name or name in ("Aguardando identificar jogador", "Você", "Aguardando Alvo"):
-        return
-    try:
-        cur = load_config()
-        known = cur.get("known_chars")
-        if not isinstance(known, dict):
-            known = {}
-            cur["known_chars"] = known
-        entry = known.get(name)
-        if not isinstance(entry, dict):
-            entry = {}
-            known[name] = entry
-        changed = False
-        if p_class and entry.get("class") != p_class:
-            entry["class"] = p_class
-            changed = True
-        if cp_val and cp_val > 0 and entry.get("combatPower") != int(cp_val):
-            entry["combatPower"] = int(cp_val)
-            changed = True
-        if changed:
-            _KNOWN_CHARS_DIRTY = True
-    except Exception:
-        pass
+    """Persistência de personagens/CP desativada por regra do usuário (sempre lido ao vivo dos pacotes)."""
+    return
 
 def load_json(path, default=None):
     if default is None: default = {}
@@ -713,19 +703,23 @@ HANDLED_OPCODES = frozenset({
 # ─────────────────────────────────────────────
 # PARSER E DESPACHANTE DE STREAM
 # ─────────────────────────────────────────────
+def _seq_diff(a, b):
+    d = (a - b) & 0xFFFFFFFF
+    return d - 0x100000000 if d >= 0x80000000 else d
+
 class PacketDispatcher:
     def __init__(self, event_queue):
         self.event_queue       = event_queue
         self.buffer            = bytearray()
         self.is_synced         = False
-        self.streams           = OrderedDict()  # stream_id -> {"buf": bytearray, "synced": bool}
+        self.streams           = OrderedDict()  # stream_id -> {"buf": bytearray, "synced": bool, "next_seq": int|None, "ooo": dict, "ooo_bytes": int, "gap_since": float}
         self.current_party_key = 0
         self.current_map_id    = None
 
-    def push(self, data_chunk, stream_id=None):
-        if not data_chunk:
-            return
+    def push(self, data_chunk, stream_id=None, seq=None, syn=False):
         if stream_id is None:
+            if not data_chunk:
+                return
             self.buffer.extend(data_chunk)
             self.process_buffer()
             return
@@ -733,11 +727,62 @@ class PacketDispatcher:
         if st is None:
             if len(self.streams) >= 32:
                 self.streams.popitem(last=False)
-            st = {"buf": bytearray(), "synced": False}
+            st = {
+                "buf": bytearray(), "synced": False,
+                "next_seq": None, "ooo": {}, "ooo_bytes": 0, "gap_since": 0.0
+            }
             self.streams[stream_id] = st
         else:
             self.streams.move_to_end(stream_id)
-        st["buf"].extend(data_chunk)
+
+        if syn:
+            st["next_seq"] = ((seq + 1) & 0xFFFFFFFF) if seq is not None else None
+            st["ooo"].clear()
+            st["ooo_bytes"] = 0
+            st["buf"].clear()
+            st["synced"] = False
+            if not data_chunk:
+                return
+
+        if not data_chunk:
+            return
+
+        if seq is None:
+            st["buf"].extend(data_chunk)
+        else:
+            if st["next_seq"] is None:
+                st["next_seq"] = seq
+            diff = _seq_diff(seq, st["next_seq"])
+            if diff <= 0:
+                overlap = -diff
+                if overlap < len(data_chunk):
+                    st["buf"].extend(data_chunk[overlap:])
+                    st["next_seq"] = (seq + len(data_chunk)) & 0xFFFFFFFF
+            else:
+                if seq not in st["ooo"]:
+                    if not st["ooo"]:
+                        st["gap_since"] = time.time()
+                    st["ooo"][seq] = data_chunk
+                    st["ooo_bytes"] += len(data_chunk)
+                if st["ooo_bytes"] > 524288 or (time.time() - st["gap_since"] > 1.0):
+                    min_seq = min(st["ooo"].keys(), key=lambda s: _seq_diff(s, st["next_seq"]))
+                    st["next_seq"] = min_seq
+
+            while st["ooo"]:
+                ready = [s for s in st["ooo"] if _seq_diff(s, st["next_seq"]) <= 0]
+                if not ready:
+                    break
+                ready.sort(key=lambda s: _seq_diff(s, st["next_seq"]))
+                for s in ready:
+                    chunk = st["ooo"].pop(s)
+                    st["ooo_bytes"] -= len(chunk)
+                    d_s = _seq_diff(s, st["next_seq"])
+                    if d_s <= 0:
+                        ov = -d_s
+                        if ov < len(chunk):
+                            st["buf"].extend(chunk[ov:])
+                            st["next_seq"] = (s + len(chunk)) & 0xFFFFFFFF
+
         st["synced"] = self._process_buf(st["buf"], st["synced"])
         self.is_synced = st["synced"]
 
@@ -973,7 +1018,7 @@ class PacketDispatcher:
                 # Fallback no tail do pacote caso cp_val tenha falhado (busca par combatPower <= highestCombatPower)
                 if not (100 <= cp_val <= 10_000_000) and end - start > 64:
                     cp_val = 0
-                    scan_start = max(start + 32, end - 140)
+                    scan_start = max(start + 32, end - 450)
                     for off in range(end - 18, scan_start, -1):
                         c1, c2 = struct.unpack_from('<qq', buf, off)
                         if 1000 <= c1 <= c2 <= 5_000_000 and (c2 - c1) <= c1:
@@ -1759,10 +1804,12 @@ class SnifferThread(threading.Thread):
                     TSHARK_PATH, "-l", "-n",
                     "-i", str(iface),
                     "-f", f"tcp src port {SERVER_PORT}",
-                    "-Y", "tcp.payload and not tcp.analysis.retransmission",
+                    "-Y", "tcp.payload or tcp.flags.syn == 1",
                     "-T", "fields",
                     "-E", "separator=|",
                     "-e", "tcp.stream",
+                    "-e", "tcp.seq_raw",
+                    "-e", "tcp.flags.syn",
                     "-e", "tcp.payload"
                 ]
                 log(f"[Sniffer] Tentando capturar na interface: {iface} (porta {SERVER_PORT})...")
@@ -1813,8 +1860,17 @@ class SnifferThread(threading.Thread):
                         if not h or self.is_paused:
                             continue
                         try:
-                            if "|" in h:
-                                stream_str, hex_payload = h.split("|", 1)
+                            parts = h.split("|")
+                            if len(parts) >= 4:
+                                stream_str, seq_str, syn_str, hex_payload = parts[0], parts[1], parts[2], parts[3]
+                                is_syn = syn_str in ("1", "True", "true")
+                                if not hex_payload and not is_syn:
+                                    continue
+                                seq_num = int(seq_str) if seq_str else None
+                                raw = bytes.fromhex(hex_payload) if hex_payload else b""
+                                self.dispatcher.push(raw, stream_id=stream_str or "0", seq=seq_num, syn=is_syn)
+                            elif len(parts) == 2:
+                                stream_str, hex_payload = parts
                                 if not hex_payload:
                                     continue
                                 raw = bytes.fromhex(hex_payload)
@@ -2313,15 +2369,7 @@ class OverlayDPSMeter:
         self.provisional_keys   = set()  # keys associadas provisoriamente quando sk_id=0
         self.players_info       = {}  # name -> {'class': str, 'combatPower': int, 'deaths': int}
         cfg = load_config()
-        self.known_chars   = cfg.get("known_chars", {})
-        known_chars        = self.known_chars
-        if isinstance(known_chars, dict):
-            for k_name, k_data in known_chars.items():
-                if isinstance(k_data, dict):
-                    self.players_info[k_name] = {
-                        "class":       k_data.get("class", "templar"),
-                        "combatPower": int(k_data.get("combatPower", 0))
-                    }
+        self.known_chars        = {}
 
         self.party_members = {}  # name -> {'key': int, 'dbid': int, 'class': str, 'combatPower': int, 'deaths': int}
         self.party_member_keys = set()  # keys confirmadas por PartyUpdateMemberHPMP_NT / ForceUpdateMemberHPMP_NT
@@ -2825,14 +2873,6 @@ class OverlayDPSMeter:
                     if p_inf.get("combatPower", 0) > 0 and self.local_combat_power == 0:
                         self.local_combat_power = p_inf["combatPower"]
                     break
-            save_known_char(self.local_player_name, self.local_class, self.local_combat_power)
-            save_config({
-                "last_local_player": {
-                    "name": self.local_player_name,
-                    "class": self.local_class or "templar",
-                    "combatPower": self.local_combat_power
-                }
-            })
             if not self.in_combat:
                 self.show_standby_local_player()
 
@@ -3255,16 +3295,23 @@ class OverlayDPSMeter:
         self.show_standby_local_player()
 
     def _perform_map_or_loading_reset(self, new_map=None, new_map_key=0, clear_keys=True, set_loading=False, now=None, reset_map_id=False):
-        """Limpa entidades da instância/mapa anterior e reseta métricas preservando a identidade do jogador local."""
+        """Limpa entidades da instância/mapa anterior e reseta métricas sem manter CPs salvos em disco."""
         cur_t = now if now is not None else time.time()
         if reset_map_id:
             self.current_map_id = None
+            self.player_identified = False
+            self.local_player_name = "Aguardando identificar jogador"
+            self.local_class = None
+            self.local_combat_power = 0
+            self.local_dbid = 0
         elif new_map is not None:
             self.current_map_id = new_map
         self.current_map_key = new_map_key or 0
         self.npc_registry.clear()
         self.summon_owners.clear()
         self.killed_boss_names.clear()
+        self.players_info.clear()
+        self.known_chars.clear()
         if clear_keys:
             self.party_member_keys.clear()
             self.provisional_keys.clear()
@@ -3751,21 +3798,14 @@ class OverlayDPSMeter:
                             if len(unkeyed) == 1:
                                 p_name = unkeyed[0]
 
-                # Fallback estrito: apenas o último jogador local confirmado pelo usuário ou login (nunca estranhos do mundo)
-                if not p_name:
-                    last_lp = load_config().get("last_local_player")
-                    if isinstance(last_lp, dict) and last_lp.get("name"):
-                        if not self.local_class or last_lp.get("class") == self.local_class:
-                            p_name = last_lp["name"]
-                            if self.local_combat_power <= 0 and last_lp.get("combatPower", 0) > 0:
-                                self.local_combat_power = int(last_lp["combatPower"])
-
                 if p_name:
+                    if self.local_player_name and p_name.lower() != self.local_player_name.lower() and evt.get("combatPower", 0) <= 0:
+                        self.local_combat_power = 0
                     self.local_player_name = p_name
                     self.player_identified = True
                     self.players_names[self.local_player_key] = self.local_player_name
 
-                    # Se já havia informações da party ou players_info, sincroniza CP/classe se disponível
+                    # Se já havia informações da party ou players_info em sessão ativa, sincroniza CP/classe se disponível
                     for m_name, m_data in self.party_members.items():
                         if (
                             m_name.lower() == self.local_player_name.lower()
@@ -3785,14 +3825,7 @@ class OverlayDPSMeter:
                             if p_n.lower() == self.local_player_name.lower() and p_inf.get("combatPower", 0) > 0:
                                 self.local_combat_power = p_inf["combatPower"]
                                 break
-                    self._remember_player(self.local_player_name, self.local_class, self.local_combat_power, self.local_player_key, self.local_dbid, is_party_or_local=True)
-                    save_config({
-                        "last_local_player": {
-                            "name": self.local_player_name,
-                            "class": self.local_class or "templar",
-                            "combatPower": self.local_combat_power
-                        }
-                    })
+                    self._remember_player(self.local_player_name, self.local_class, self.local_combat_power, self.local_player_key, self.local_dbid)
 
                     if "LOCAL" in self.players_combat:
                         self.players_combat["LOCAL"]["name"]        = self.local_player_name
@@ -3903,14 +3936,7 @@ class OverlayDPSMeter:
                 if cp_v > 0:
                     self.local_combat_power = cp_v
                     if self.player_identified and self.local_player_name and self.local_player_name != "Aguardando identificar jogador":
-                        self._remember_player(self.local_player_name, self.local_class, self.local_combat_power, self.local_player_key, self.local_dbid, is_party_or_local=True)
-                        save_config({
-                            "last_local_player": {
-                                "name": self.local_player_name,
-                                "class": self.local_class or "templar",
-                                "combatPower": self.local_combat_power
-                            }
-                        })
+                        self._remember_player(self.local_player_name, self.local_class, self.local_combat_power, self.local_player_key, self.local_dbid)
                     if "LOCAL" in self.players_combat:
                         self.players_combat["LOCAL"]["combatPower"] = self.local_combat_power
                     if self.player_identified and not self.in_combat:
@@ -3936,7 +3962,7 @@ class OverlayDPSMeter:
                         self.players_names[m_key] = m_name
                         self.npc_registry.pop(m_key, None)
                         self.provisional_keys.discard(m_key)
-                    self._remember_player(m_name, m.get("class"), m_cp, m_key, m_dbid, is_party_or_local=True)
+                    self._remember_player(m_name, m.get("class"), m_cp, m_key, m_dbid)
                     self.party_members[m_name] = {
                         "key":         m_key,
                         "dbid":        m_dbid,
@@ -3961,14 +3987,6 @@ class OverlayDPSMeter:
                             self.local_class = m["class"]
                         if m_cp > 0:
                             self.local_combat_power = m_cp
-                            save_known_char(self.local_player_name, self.local_class, self.local_combat_power)
-                            save_config({
-                                "last_local_player": {
-                                    "name": self.local_player_name,
-                                    "class": self.local_class or "templar",
-                                    "combatPower": self.local_combat_power
-                                }
-                            })
                         if "LOCAL" in self.players_combat:
                             self.players_combat["LOCAL"]["name"]        = self.local_player_name
                             self.players_combat["LOCAL"]["class"]       = self.local_class
@@ -3988,11 +4006,11 @@ class OverlayDPSMeter:
                     m_cp   = int(m.get("combatPower") or 0)
                     m_cls  = m.get("class") or "gladiator"
                     existing = self.party_members.get(m_name, {})
-                    m_key  = existing.get("key") or (self.dbid_to_key.get(m_dbid, 0) if m_dbid else 0)
+                    m_key  = int(m.get("key") or 0) or existing.get("key") or (self.dbid_to_key.get(m_dbid, 0) if m_dbid else 0)
                     if m_key:
                         self.players_names[m_key] = m_name
                         self.npc_registry.pop(m_key, None)
-                    self._remember_player(m_name, m_cls, m_cp, m_key, m_dbid, is_party_or_local=True)
+                    self._remember_player(m_name, m_cls, m_cp, m_key, m_dbid)
                     self.party_members[m_name] = {
                         "key":         m_key,
                         "dbid":        m_dbid or existing.get("dbid", 0),
@@ -4000,6 +4018,23 @@ class OverlayDPSMeter:
                         "combatPower": m_cp or existing.get("combatPower", 0) or self.get_player_cp(m_name, m_key),
                         "deaths":      existing.get("deaths", 0)
                     }
+                    is_loc_member = bool(
+                        (self.local_dbid and m_dbid == self.local_dbid)
+                        or (self.player_identified and self.local_player_name and m_name.lower() == self.local_player_name.lower())
+                    )
+                    if is_loc_member:
+                        if m_name and m_name != "Aguardando identificar jogador":
+                            self.local_player_name = m_name
+                            self.player_identified = True
+                        if m_key:
+                            self.local_player_key = m_key
+                            self.players_names[m_key] = m_name
+                        if m_cls:
+                            self.local_class = m_cls
+                        if m_cp > 0:
+                            self.local_combat_power = m_cp
+                if self.player_identified and not self.in_combat:
+                    self.show_standby_local_player()
 
             # 5. Membro Adicionado ou Reconectado ao Grupo (PartyAddMember_NT / PartyReconnectMember_NT / ForceAdd / ForceReconnect)
             elif etype == "party_add":
@@ -4334,32 +4369,31 @@ class OverlayDPSMeter:
                     self.npc_registry[target_key] = {
                         "name": "Chefe" if is_dungeon else "Monstro",
                         "npc_id": 0,
-                        "is_boss": is_dungeon,
+                        "is_boss": False,
                         "hp": None,
                         "hp_max": 0,
                         "berserk_ms": 0,
                         "in_combat": True
                     }
                 target_npc = self.npc_registry.get(target_key)
-                target_is_boss = bool(
+                target_is_real_boss = bool(
                     (target_npc and (target_npc.get("is_boss") or is_real_boss_npc(target_npc.get("npc_id", 0), target_npc.get("name", ""), self.current_map_id)))
                     or target_key in self.encounter_boss_keys
                     or target_key == self.active_boss_key
-                    or is_dungeon
                 )
-                if not target_is_boss and target_npc and target_npc.get("berserk_ms", 0) > 0:
-                    target_is_boss = True
+                if not target_is_real_boss and target_npc and target_npc.get("berserk_ms", 0) > 0:
+                    target_is_real_boss = True
                     target_npc["is_boss"] = True
+                target_is_boss = target_is_real_boss
 
                 # SE O MODO "SÓ BOSS" ESTIVER ATIVO:
                 if self.boss_only:
-                    # Se não estamos em luta de boss ativa e o alvo NÃO é um Boss:
-                    # Ignora completamente mobs comuns/trash mobs para não poluir o medidor
-                    if not self.encounter_has_boss and not target_is_boss:
-                        continue
                     # Se a luta anterior de Boss já foi finalizada (boss morreu ou congelado) e o alvo NÃO é boss:
                     # Mantém o relatório do Boss na tela, ignorando adds residuais ou trash a caminho do próximo boss
-                    if (self.combat_frozen or self.target_is_dead) and not target_is_boss:
+                    if (self.combat_frozen or self.target_is_dead) and not target_is_boss and (self.encounter_has_boss or not is_dungeon):
+                        continue
+                    # Fora de dungeon, ignora mobs comuns/trash mobs quando não há luta de boss ativa
+                    if not self.encounter_has_boss and not target_is_boss and not is_dungeon:
                         continue
 
                 # Quando não há luta ativa ou a luta anterior já terminou (Boss morreu / Wipe congelado):
@@ -4383,15 +4417,21 @@ class OverlayDPSMeter:
                     new_encounter = True
                 elif self.combat_frozen or self.target_is_dead:
                     # Luta anterior já estava encerrada/congelada (morte do boss/mob ou wipe) e um novo alvo vivo foi atacado
-                    if not self.boss_only or target_is_boss:
+                    if not self.boss_only or target_is_boss or (is_dungeon and not self.encounter_has_boss):
                         new_encounter = True
                 elif self.last_hit_t and (hit_t - self.last_hit_t) > idle_timeout:
                     # Inatividade prolongada (15s trash / 90s boss): fecha encontro anterior e abre novo
-                    if not self.boss_only or target_is_boss:
+                    if not self.boss_only or target_is_boss or (is_dungeon and not self.encounter_has_boss):
                         new_encounter = True
                 elif target_is_boss and not self.encounter_has_boss:
-                    # Transição de trash para Boss: fecha a luta de trash e inicia o Boss isolado
-                    new_encounter = True
+                    # Se o alvo atual acabou de ser promovido a Boss (ex: hp_update >= 5M após o 1º hit), promove no encontro atual sem perder o 1º hit
+                    if target_key == self.active_target_key:
+                        self.encounter_has_boss = True
+                        self.encounter_boss_keys.add(target_key)
+                        self.active_boss_key = target_key
+                    else:
+                        # Transição de trash para Boss diferente: fecha a luta de trash e inicia o Boss isolado
+                        new_encounter = True
                 elif target_is_boss and self.active_boss_key and target_key != self.active_boss_key:
                     # Transição de um Boss A para um Boss B diferente (apenas se Boss A morreu ou ficou inativo > 12s)
                     prev_boss = self.npc_registry.get(self.active_boss_key)
