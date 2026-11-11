@@ -456,7 +456,7 @@ class ByteReader:
         self.data   = data
         self.pos    = offset
         self.end    = len(data) if end is None else end
-        self.bit_at = 0
+        self.bit_at = -1
         self.bit    = 0
 
     def remaining(self):
@@ -539,7 +539,7 @@ class ByteReader:
         return s.decode('utf-8', errors='ignore').strip()
 
     def bool(self):
-        if self.bit_at == 0:
+        if self.bit_at < 0:
             if self.pos >= self.end: return False
             self.bit_at = self.pos
             self.bit    = 0
@@ -547,7 +547,7 @@ class ByteReader:
         b_val = bool(self.data[self.bit_at] & (1 << self.bit))
         self.bit += 1
         if self.bit > 7:
-            self.bit_at = 0
+            self.bit_at = -1
             self.bit    = 0
         return b_val
 
@@ -648,9 +648,9 @@ def read_state(r):
     return {'pos': pos, 'targetKey': targetKey, 'live': live, 'hp': hp, 'hpMax': hpMax}
 
 def read_deco_slot(r):
-    for _ in range(5): r.u8()
-    r.i32(); r.i32()
-    for _ in range(4): r.u8()
+    r.u8(); r.u8(); r.u8(); r.u8(); r.bool()  # slot, colorR, colorG, colorB, colorRemove
+    r.i32(); r.i32()                          # materialId, patternId
+    r.u8(); r.u8(); r.u8(); r.bool()          # patternColorR, patternColorG, patternColorB, patternColorRemove
     for _ in range(4): r.u16()
     r.u8(); r.bool()
     r.u16(); r.u16()
@@ -718,25 +718,43 @@ class PacketDispatcher:
         self.event_queue       = event_queue
         self.buffer            = bytearray()
         self.is_synced         = False
+        self.streams           = OrderedDict()  # stream_id -> {"buf": bytearray, "synced": bool}
         self.current_party_key = 0
         self.current_map_id    = None
 
-    def push(self, data_chunk):
-        if not data_chunk: return
-        self.buffer.extend(data_chunk)
-        self.process_buffer()
+    def push(self, data_chunk, stream_id=None):
+        if not data_chunk:
+            return
+        if stream_id is None:
+            self.buffer.extend(data_chunk)
+            self.process_buffer()
+            return
+        st = self.streams.get(stream_id)
+        if st is None:
+            if len(self.streams) >= 32:
+                self.streams.popitem(last=False)
+            st = {"buf": bytearray(), "synced": False}
+            self.streams[stream_id] = st
+        else:
+            self.streams.move_to_end(stream_id)
+        st["buf"].extend(data_chunk)
+        st["synced"] = self._process_buf(st["buf"], st["synced"])
+        self.is_synced = st["synced"]
 
     def process_buffer(self):
+        self.is_synced = self._process_buf(self.buffer, self.is_synced)
+
+    def _process_buf(self, buf, synced):
         pos = 0
-        buf_len = len(self.buffer)
+        buf_len = len(buf)
 
         while pos < buf_len:
-            res = get_packet_length(self.buffer, pos, buf_len)
+            res = get_packet_length(buf, pos, buf_len)
             if res is None:
                 break
             pkt_len, vlen = res
             if pkt_len < 0:
-                self.is_synced = False
+                synced = False
                 pos += 1
                 continue
             if pos + pkt_len > buf_len:
@@ -745,30 +763,33 @@ class PacketDispatcher:
             body_start = pos + vlen + 2
             body_end   = pos + pkt_len
 
-            opcode = self.buffer[pos + vlen] | (self.buffer[pos + vlen + 1] << 8)
+            opcode = buf[pos + vlen] | (buf[pos + vlen + 1] << 8)
 
             if opcode == 65535:  # 0xFFFF = LZ4 Bundle
                 if body_end - body_start > 4:
-                    decomp_size = struct.unpack_from('<I', self.buffer, body_start)[0]
+                    decomp_size = struct.unpack_from('<I', buf, body_start)[0]
                     if 0 < decomp_size <= 262144:
                         try:
                             decomp = lz4.block.decompress(
-                                memoryview(self.buffer)[body_start + 4 : body_end],
+                                memoryview(buf)[body_start + 4 : body_end],
                                 uncompressed_size=decomp_size
                             )
+                            self.is_synced = synced
                             self.parse_payload_packets(decomp)
-                            self.is_synced = True
+                            synced = True
                         except Exception:
                             pass
                 pos += pkt_len
                 continue
             elif opcode in HANDLED_OPCODES:
-                self.dispatch_packet(opcode, self.buffer, body_start, body_end, from_lz4=False)
+                self.is_synced = synced
+                self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False)
 
             pos += pkt_len
 
         if pos > 0:
-            del self.buffer[:pos]
+            del buf[:pos]
+        return synced
 
     def parse_payload_packets(self, payload):
         pos = 0
@@ -853,23 +874,31 @@ class PacketDispatcher:
                 except Exception:
                     pass
 
-            # 0.5. PrepareEnterMap_NT (13857): Troca de Mapa / Entrada em Dungeon (Idêntico ao PrepareEnterMap_NT do Questlog)
+            # 0.5. PrepareEnterMap_NT (13857): Troca de Mapa / Entrada em Dungeon / Loading (Idêntico ao PrepareEnterMap_NT do Questlog)
             elif opcode == 13857:
                 reader.i32()
                 map_id = reader.i32()
                 reader.i64()
                 read_pos(reader)
                 reader.f32()
-                reader.u8()
+                reason = reader.u8()
                 reader.u8()
                 reader.i64()
                 reader.list(lambda r: (r.i32(), r.u8(), r.i64()))
-                reader.vi32()
-                reader.str()
-                reader.u8()
+                tp_effect = reader.vi32()
+                cutscene = reader.str()
+                inform_type = reader.u8()
                 if map_id > 0:
+                    log(f"PrepareEnterMap_NT: mapId={map_id}, reason={reason}, tpEffect={tp_effect}, cutscene='{cutscene}', inform={inform_type}")
                     self.current_map_id = map_id
-                    self.event_queue.put({"type": "map_change", "map_id": map_id})
+                    self.event_queue.put({
+                        "type":            "map_change",
+                        "map_id":          map_id,
+                        "reason":          reason,
+                        "teleport_effect": tp_effect,
+                        "cutscene":        cutscene,
+                        "inform_type":     inform_type
+                    })
 
             # 1. MyCharAppear_NT (13875): Próprio Jogador (Idêntico ao A4 do Questlog)
             elif opcode == 13875:
@@ -882,6 +911,9 @@ class PacketDispatcher:
                 p_class = get_class_by_pcid(pcId)
                 local_dbid = 0
                 cp_val = 0
+                appear_reason = 0
+                map_key = 0
+                appear_map_id = 0
                 try:
                     if t & 2: reader.u8()
                     reader.i32(); reader.i32(); reader.i32(); reader.i32()
@@ -899,8 +931,9 @@ class PacketDispatcher:
                     reader.list(lambda r: (r.u16(), r.i32()))
                     reader.list(read_abnormal)
                     reader.list(read_equip)
-                    if flags & 2: reader.u8()
-                    reader.i64(); reader.i32()
+                    if flags & 2: appear_reason = int(reader.u8())
+                    map_key = int(reader.i64())
+                    appear_map_id = int(reader.i32())
                     if flags & 4: reader.i32()
                     if flags & 8: reader.i32()
                     if flags & 16: read_pos(reader)
@@ -947,8 +980,11 @@ class PacketDispatcher:
                             cp_val = int(c1)
                             break
 
+                if appear_map_id > 0:
+                    self.current_map_id = appear_map_id
+
                 if char_key:
-                    log(f"MyCharAppear_NT: Key={char_key}, DBID={local_dbid}, Nick='{nick}', pcId={pcId}, Class={p_class}, CP={cp_val}")
+                    log(f"MyCharAppear_NT: Key={char_key}, DBID={local_dbid}, Nick='{nick}', pcId={pcId}, Class={p_class}, CP={cp_val}, mapId={appear_map_id}, mapKey={map_key}, reason={appear_reason}")
                     self.event_queue.put({
                         "type":        "my_char",
                         "key":         char_key,
@@ -956,7 +992,10 @@ class PacketDispatcher:
                         "name":        nick,
                         "pcId":        pcId,
                         "class":       p_class,
-                        "combatPower": cp_val
+                        "combatPower": cp_val,
+                        "map_id":      appear_map_id if appear_map_id > 0 else 0,
+                        "map_key":     map_key,
+                        "reason":      appear_reason
                     })
 
             # 2. CharAppear_NT (13893): Outros Jogadores (Idêntico ao w4 do Questlog: extrai dbid + combatPower)
@@ -1722,6 +1761,8 @@ class SnifferThread(threading.Thread):
                     "-f", f"tcp src port {SERVER_PORT}",
                     "-Y", "tcp.payload and not tcp.analysis.retransmission",
                     "-T", "fields",
+                    "-E", "separator=|",
+                    "-e", "tcp.stream",
                     "-e", "tcp.payload"
                 ]
                 log(f"[Sniffer] Tentando capturar na interface: {iface} (porta {SERVER_PORT})...")
@@ -1772,8 +1813,15 @@ class SnifferThread(threading.Thread):
                         if not h or self.is_paused:
                             continue
                         try:
-                            raw = bytes.fromhex(h)
-                            self.dispatcher.push(raw)
+                            if "|" in h:
+                                stream_str, hex_payload = h.split("|", 1)
+                                if not hex_payload:
+                                    continue
+                                raw = bytes.fromhex(hex_payload)
+                                self.dispatcher.push(raw, stream_id=stream_str or "0")
+                            else:
+                                raw = bytes.fromhex(h)
+                                self.dispatcher.push(raw)
                         except Exception:
                             continue
 
@@ -2184,7 +2232,11 @@ class PillRenderer:
 # INTERFACE GRÁFICA OVERLAY DPS METER (FLUTUANTE)
 # ─────────────────────────────────────────────
 class OverlayDPSMeter:
-    boss_only = True
+    boss_only          = True
+    current_map_key    = 0
+    is_loading         = False
+    loading_started_at = 0.0
+    last_map_reset_t   = 0.0
 
     def __init__(self, root):
         # 1. Janela Principal Nativa (1x1 Offscreen) -> Garante ícone 100% nativo na Barra de Tarefas do Windows 11
@@ -2248,6 +2300,10 @@ class OverlayDPSMeter:
         self.local_class        = None
         self.local_combat_power = 0
         self.current_map_id     = None
+        self.current_map_key    = 0
+        self.is_loading         = False
+        self.loading_started_at = 0.0
+        self.last_map_reset_t   = 0.0
         self.account_characters = []
 
         self.players_names      = {}  # key -> name
@@ -3184,6 +3240,7 @@ class OverlayDPSMeter:
         self.encounter_has_boss      = False
         self.encounter_boss_keys.clear()
         self.active_boss_key         = None
+        self.active_target_key       = None
         self.combat_start            = None
         self.last_hit_t              = None
         self.in_combat               = False
@@ -3196,6 +3253,32 @@ class OverlayDPSMeter:
         self.active_target_name      = "Nenhum alvo"
         self._has_pending_skill_icons = False
         self.show_standby_local_player()
+
+    def _perform_map_or_loading_reset(self, new_map=None, new_map_key=0, clear_keys=True, set_loading=False, now=None, reset_map_id=False):
+        """Limpa entidades da instância/mapa anterior e reseta métricas preservando a identidade do jogador local."""
+        cur_t = now if now is not None else time.time()
+        if reset_map_id:
+            self.current_map_id = None
+        elif new_map is not None:
+            self.current_map_id = new_map
+        self.current_map_key = new_map_key or 0
+        self.npc_registry.clear()
+        self.summon_owners.clear()
+        self.killed_boss_names.clear()
+        if clear_keys:
+            self.party_member_keys.clear()
+            self.provisional_keys.clear()
+            self.dbid_to_key.clear()
+            self.key_to_char.clear()
+            self.local_player_key = None
+            self.players_names.clear()
+            for m_name, m_data in self.party_members.items():
+                m_data["key"] = 0
+        self.is_loading = bool(set_loading)
+        if set_loading:
+            self.loading_started_at = cur_t
+        self.last_map_reset_t = cur_t
+        self.reset_metrics()
 
     def show_standby_local_player(self):
         if not self.rows:
@@ -3554,30 +3637,15 @@ class OverlayDPSMeter:
                 for c in self.account_characters:
                     c_name = c.get("name")
                     if c_name:
-                        self._remember_player(c_name, c.get("class"), c.get("combatPower", 0), c.get("key", 0), c.get("dbid", 0))
+                        self._remember_player(c_name, c.get("class"), c.get("combatPower", 0), c.get("key", 0), c.get("dbid", 0), is_party_or_local=True)
+                if self.in_combat or self.players_combat or self.combat_frozen or self.current_map_id is not None:
+                    self._perform_map_or_loading_reset(new_map=None, new_map_key=0, clear_keys=True, set_loading=False, now=now, reset_map_id=True)
 
-            # 0.5. Mudança de Mapa / Entrada ou Saída de Dungeon (PrepareEnterMap_NT 13857)
+            # 0.5. Mudança de Mapa / Entrada ou Saída de Dungeon / Qualquer Loading (PrepareEnterMap_NT 13857)
             elif etype == "map_change":
                 new_map = evt.get("map_id")
-                # Idêntico ao Questlog (if (_.data.mapId === a) break;):
-                # Ignora recarregamento de sub-zona/cutscene dentro do MESMO mapa para não perder as keys da party!
-                if new_map is not None and self.current_map_id is not None and new_map == self.current_map_id:
-                    continue
-                self.current_map_id = new_map
-                # Limpa entidades do mapa anterior e redefine keys dinâmicas de instâncias
-                self.npc_registry.clear()
-                self.summon_owners.clear()
-                self.party_member_keys.clear()
-                self.provisional_keys.clear()
-                self.dbid_to_key.clear()
-                self.key_to_char.clear()
-                self.local_player_key = None
-                self.players_names.clear()
-                self.killed_boss_names.clear()
-                for m_name, m_data in self.party_members.items():
-                    m_data["key"] = 0
-                # Teleportou / entrou ou saiu da dungeon: reseta métricas de combate e aguarda novo alvo!
-                self.reset_metrics()
+                # Reseta métricas SEMPRE em qualquer saída de dungeon, troca de mapa ou tela de loading (mesmo dentro do mesmo mapId)
+                self._perform_map_or_loading_reset(new_map=new_map, new_map_key=0, clear_keys=True, set_loading=True, now=now)
 
             # 0.6. Status do Sniffer de Rede (TShark / Npcap)
             elif etype == "sniffer_status":
@@ -3594,8 +3662,37 @@ class OverlayDPSMeter:
                     if not self.in_combat:
                         self._update_target_label(is_dead=False, dur=0.0)
 
-            # 1. Próprio Personagem Local (Identificado ao mudar de mapa / carregar / entrar em Dungeon)
+            # 1. Próprio Personagem Local (Identificado ao mudar de mapa / carregar / entrar ou sair de Dungeon)
             elif etype == "my_char":
+                mc_map = evt.get("map_id") or 0
+                mc_map_key = evt.get("map_key") or 0
+                cur_map = getattr(self, "current_map_id", None)
+                cur_map_key = getattr(self, "current_map_key", 0)
+                cur_player_key = getattr(self, "local_player_key", None)
+
+                map_changed = bool(mc_map > 0 and cur_map is not None and mc_map != cur_map)
+                inst_changed = bool(mc_map_key != 0 and cur_map_key != 0 and mc_map_key != cur_map_key)
+                has_old_combat = bool(self.in_combat or self.players_combat or self.combat_frozen)
+                char_reloaded = bool(
+                    has_old_combat
+                    and (cur_player_key is not None or (now - getattr(self, "last_map_reset_t", 0.0) > 2.0))
+                )
+
+                self.is_loading = False
+                if map_changed or inst_changed or char_reloaded:
+                    self._perform_map_or_loading_reset(
+                        new_map=mc_map if mc_map > 0 else cur_map,
+                        new_map_key=mc_map_key,
+                        clear_keys=True,
+                        set_loading=False,
+                        now=now
+                    )
+                else:
+                    if mc_map > 0:
+                        self.current_map_id = mc_map
+                    if mc_map_key != 0:
+                        self.current_map_key = mc_map_key
+
                 self.local_player_key = evt["key"]
                 self.provisional_keys.discard(self.local_player_key)
                 self.npc_registry.pop(self.local_player_key, None)
@@ -4188,6 +4285,10 @@ class OverlayDPSMeter:
 
             # 10. Dano Causado (Alinhado 100% com N(S) e j(S,z) do Questlog combat.cjs)
             elif etype == "damage":
+                if getattr(self, "is_loading", False):
+                    if (now - getattr(self, "loading_started_at", 0.0)) < 12.0:
+                        continue
+                    self.is_loading = False
                 raw_caster = evt["caster_key"]
                 # 10.0 Resolve Summon / Totem / Pet para o dono real (ownerOf no Questlog)
                 caster_key = self.summon_owners.get(raw_caster, raw_caster)
@@ -4598,7 +4699,7 @@ class OverlayDPSMeter:
                 self._m_last_info = right_str
                 self._m_last_color = r_fill
             bbox_r = self.monster_canvas.bbox(self.m_info_txt)
-            r_x = bbox_r[0] if bbox_r else (HUD_WIDTH - 10)
+            r_x = bbox_r[0] if bbox_r else (HUD_WIDTH - 10 - max(28, len(right_str) * 7))
 
             # 2. Time to Death (TTD) em vermelho vivo (#f87171) com ícone de caveira 💀
             if ttk_sec is not None and ttk_sec > 0 and not self.combat_frozen:
@@ -4607,23 +4708,26 @@ class OverlayDPSMeter:
                 if ttd_str != self._m_last_ttd:
                     self.monster_canvas.itemconfig(self.m_ttd_txt, text=ttd_str, fill="#f87171")
                     self._m_last_ttd = ttd_str
-                self.monster_canvas.coords(self.m_ttd_txt, r_x - 2, 13)
+                self.monster_canvas.coords(self.m_ttd_txt, r_x - 3, 13)
                 bbox_ttd = self.monster_canvas.bbox(self.m_ttd_txt)
-                ttd_x = bbox_ttd[0] if bbox_ttd else (r_x - 45)
+                ttd_x = bbox_ttd[0] if bbox_ttd else (r_x - 52)
             else:
                 if self._m_last_ttd != "":
                     self.monster_canvas.itemconfig(self.m_ttd_txt, text="")
                     self._m_last_ttd = ""
-                ttd_x = r_x - 4
+                ttd_x = r_x - 3
 
             # 3. Esquerda: %HP · DPS da PT
-            left_str = f"{pct}% · {pt_dps_str}" if pt_dps_str else f"{pct}%"
+            if self.in_combat or pt_dps_str:
+                left_str = f"{pct}% · {pt_dps_str}" if pt_dps_str else f"{pct}% ·"
+            else:
+                left_str = f"{pct}% ·" if right_str else ""
             if left_str != self._m_last_left:
                 self.monster_canvas.itemconfig(self.m_info_left, text=left_str, fill="#ffffff")
                 self._m_last_left = left_str
             self.monster_canvas.coords(self.m_info_left, ttd_x - 2, 13)
             bbox_l = self.monster_canvas.bbox(self.m_info_left)
-            left_boundary = bbox_l[0] if bbox_l else ttd_x
+            left_boundary = bbox_l[0] if bbox_l else (ttd_x - max(24, len(left_str) * 7))
 
         if self.is_hovered:
             self.monster_canvas.itemconfigure(self.m_info_txt, state="hidden")
