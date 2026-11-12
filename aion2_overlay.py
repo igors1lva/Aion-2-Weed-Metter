@@ -806,7 +806,7 @@ class PacketDispatcher:
                     pos += 1
                     continue
                 pkt_len, vlen = res
-                if pkt_len < 0:
+                if pkt_len <= 0:
                     pos += 1
                     continue
                 if pos + pkt_len > buf_len:
@@ -823,7 +823,7 @@ class PacketDispatcher:
                     bundle_ok = False
                     if body_end - body_start > 4:
                         decomp_size = struct.unpack_from('<I', buf, body_start)[0]
-                        if 0 < decomp_size <= 262144:
+                        if 0 < decomp_size <= 1048576:
                             try:
                                 decomp = lz4.block.decompress(
                                     memoryview(buf)[body_start + 4 : body_end],
@@ -843,21 +843,32 @@ class PacketDispatcher:
                     pos += 1
                     continue
 
-                if pos + pkt_len + 3 <= buf_len:
-                    nxt = get_packet_length(buf, pos + pkt_len, buf_len)
-                    if nxt is not None and nxt[0] > 0:
-                        synced = True
-                        if opcode in HANDLED_OPCODES:
-                            self.is_synced = True
-                            self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False)
-                        pos += pkt_len
-                        last_valid_end = pos
-                        first_incomplete = None
-                        continue
+                if first_incomplete is not None:
                     pos += 1
                     continue
 
-                if opcode in HANDLED_OPCODES:
+                if pos + pkt_len + 3 <= buf_len:
+                    nxt = get_packet_length(buf, pos + pkt_len, buf_len)
+                    if nxt is not None and nxt[0] > 0:
+                        nxt_len, nxt_vlen = nxt
+                        nxt_op_off = pos + pkt_len + nxt_vlen
+                        nxt_valid = False
+                        if pos + pkt_len + nxt_len <= buf_len and nxt_op_off + 2 <= buf_len:
+                            nxt_opcode = buf[nxt_op_off] | (buf[nxt_op_off + 1] << 8)
+                            nxt_valid = (nxt_opcode in HANDLED_OPCODES or nxt_opcode == 65535)
+                        if opcode in HANDLED_OPCODES or nxt_valid:
+                            synced = True
+                            if opcode in HANDLED_OPCODES:
+                                self.is_synced = True
+                                self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False)
+                            pos += pkt_len
+                            last_valid_end = pos
+                            first_incomplete = None
+                            continue
+                    pos += 1
+                    continue
+
+                if pos == 0 and last_valid_end == 0 and (pos + pkt_len) == buf_len and opcode in HANDLED_OPCODES:
                     self.is_synced = False
                     self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False)
                     pos += pkt_len
@@ -874,7 +885,7 @@ class PacketDispatcher:
             if res is None:
                 break
             pkt_len, vlen = res
-            if pkt_len < 0:
+            if pkt_len <= 0:
                 synced = False
                 first_incomplete = None
                 pos += 1
@@ -895,7 +906,7 @@ class PacketDispatcher:
                 bundle_ok = False
                 if body_end - body_start > 4:
                     decomp_size = struct.unpack_from('<I', buf, body_start)[0]
-                    if 0 < decomp_size <= 262144:
+                    if 0 < decomp_size <= 1048576:
                         try:
                             decomp = lz4.block.decompress(
                                 memoryview(buf)[body_start + 4 : body_end],
@@ -2020,8 +2031,8 @@ class SnifferThread(threading.Thread):
 # ─────────────────────────────────────────────
 # RENDERIZADOR DE BARRAS FLUTUANTES OTIMIZADO (PRÉ-ALOCADO + CACHE LRU)
 # ─────────────────────────────────────────────
-TRANSPARENT_KEY = "#010203"
-TRANSPARENT_RGB = (1, 2, 3, 255)
+TRANSPARENT_KEY = "#120e16"
+TRANSPARENT_RGB = (18, 14, 22, 255)
 HUD_WIDTH       = 438
 MONSTER_BAR_H   = 26
 PLAYER_BAR_H    = 30
@@ -2264,32 +2275,29 @@ class PillRenderer:
         return (raw_w // 2) * 2
 
     def get_monster_pill(self, ratio):
-        # Exibe APENAS a pílula vermelha sob o nome do boss proporcional ao HP,
-        # mantendo todo o restante do topo 100% transparente
-        calc_w = int(HUD_WIDTH * ratio)
-        min_w = 120
-        bar_w = max(min_w, min(HUD_WIDTH - 75, calc_w))
-        bar_w = self._quantize_w(bar_w)
+        # Barra cheia arredondada estilo Questlog (fundo carmesim escuro #22161a + borda #5a3038 + preenchimento HP proporcional),
+        # eliminando necessidade de colorkey no topo para zero queda de FPS em DX12/AFMF!
+        bar_w = self._quantize_w(int(HUD_WIDTH * max(0.0, min(1.0, ratio))))
         if bar_w in self.monster_cache:
             self.monster_cache.move_to_end(bar_w)
             return self.monster_cache[bar_w]
 
-        out = Image.new("RGBA", (HUD_WIDTH, MONSTER_BAR_H), TRANSPARENT_RGB)
-        if bar_w > 4:
-            pill_img = Image.new("RGBA", (bar_w, MONSTER_BAR_H), (0, 0, 0, 0))
+        bar_img = Image.new("RGBA", (HUD_WIDTH, MONSTER_BAR_H), (34, 22, 26, 255))
+        if bar_w > 0:
             grad_crop = self.m_full_grad.crop((0, 0, bar_w, MONSTER_BAR_H))
-            pill_mask = Image.new("L", (bar_w, MONSTER_BAR_H), 0)
-            ImageDraw.Draw(pill_mask).rounded_rectangle(
-                [0, 0, bar_w - 1, MONSTER_BAR_H - 1], radius=6, fill=255
-            )
-            pill_img.paste(grad_crop, (0, 0), pill_mask)
-            d = ImageDraw.Draw(pill_img)
-            d.rounded_rectangle(
-                [0, 0, bar_w - 1, MONSTER_BAR_H - 1],
-                radius=6, outline=(225, 115, 125, 255), width=1
-            )
-            out.paste(pill_img, (0, 0), pill_mask)
+            bar_img.paste(grad_crop, (0, 0))
+            if bar_w < HUD_WIDTH:
+                d_edge = ImageDraw.Draw(bar_img)
+                d_edge.line([(bar_w - 1, 2), (bar_w - 1, MONSTER_BAR_H - 3)], fill=(235, 130, 140, 255), width=1)
 
+        d = ImageDraw.Draw(bar_img)
+        d.rounded_rectangle(
+            [0, 0, HUD_WIDTH - 1, MONSTER_BAR_H - 1],
+            radius=6, outline=(90, 48, 56, 255), width=1
+        )
+
+        out = Image.new("RGBA", (HUD_WIDTH, MONSTER_BAR_H), TRANSPARENT_RGB)
+        out.paste(bar_img, (0, 0), self.m_mask)
         photo = ImageTk.PhotoImage(out)
         self.monster_cache[bar_w] = photo
         if len(self.monster_cache) > 96:
@@ -2409,17 +2417,12 @@ class OverlayDPSMeter:
             except Exception:
                 pass
         self.taskbar_win.geometry("1x1+-32000+-32000")
-        try:
-            self.taskbar_win.attributes("-alpha", 0.0)
-        except Exception:
-            pass
         self.taskbar_win.protocol("WM_DELETE_WINDOW", self.on_close)
         self.taskbar_win.bind("<Unmap>", self._on_taskbar_unmap)
         self.taskbar_win.bind("<Map>", self._on_taskbar_map)
 
-        # 2. Janela Única Flutuante da HUD Otimizada para DirectX 12 / AMD Frame Gen (AFMF) / Windows 11 MPO:
-        #    Usa APENAS UMA janela (self.root) com LWA_COLORKEY (-transparentcolor), SEM bg_win e SEM -alpha (LWA_ALPHA),
-        #    evitando composição alpha dupla no DWM que derruba FPS no Aion 2 com Frame Generation!
+        # 2. Janela Única Flutuante Hardware-Clipped via Win32 SetWindowRgn (ZERO WS_EX_LAYERED quando desbloqueado!):
+        #    Elimina LWA_COLORKEY e LWA_ALPHA no compositor DWM do Windows 11 para manter Direct Flip / MPO / AMD AFMF ativos!
         self.bg_win = None
         self.bg_monster_canvas = None
         self.bg_hover_frame = None
@@ -2430,10 +2433,6 @@ class OverlayDPSMeter:
         self.root.geometry(f"{HUD_WIDTH}x68+80+80")
         self.root.attributes("-topmost", True)
         self.root.configure(bg=TRANSPARENT_KEY)
-        try:
-            self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
-        except Exception:
-            pass
 
         self._cur_win_x = 80
         self._cur_win_y = 80
@@ -2576,12 +2575,49 @@ class OverlayDPSMeter:
         """Com janela única otimizada para DX12/AFMF, não precisa ficar chamando SetWindowPos entre 2 camadas."""
         return
 
+    def _update_window_region(self, count=None):
+        """
+        Recorta os cantos arredondados e espaços entre barras diretamente via Win32 SetWindowRgn
+        (janela opaca hardware-clipped sem WS_EX_LAYERED), evitando quedas de FPS em DX12 / AMD AFMF.
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = self._get_win_hwnd(self.root)
+            if not hwnd:
+                return
+            gdi32 = ctypes.windll.gdi32
+            user32 = ctypes.windll.user32
+            n_rows = getattr(self, "visible_rows", 1) if count is None else max(1, count)
+
+            combined = gdi32.CreateRoundRectRgn(0, 0, HUD_WIDTH + 1, MONSTER_BAR_H + 1, 12, 12)
+            if not combined:
+                return
+
+            y0 = self.bars_container.winfo_y() if hasattr(self, "bars_container") else 0
+            if y0 <= MONSTER_BAR_H:
+                y0 = MONSTER_BAR_H + 4
+
+            RGN_OR = 2
+            for i in range(n_rows):
+                ry = y0 + i * (PLAYER_BAR_H + 3)
+                row_rgn = gdi32.CreateRoundRectRgn(0, ry, HUD_WIDTH + 1, ry + PLAYER_BAR_H + 1, 12, 12)
+                if row_rgn:
+                    gdi32.CombineRgn(combined, combined, row_rgn, RGN_OR)
+                    gdi32.DeleteObject(row_rgn)
+
+            if not user32.SetWindowRgn(hwnd, combined, True):
+                gdi32.DeleteObject(combined)
+        except Exception:
+            pass
+
     def _apply_win32_overlay_styles(self):
         """
         Configura atributos nativos Win32 e DWM (Windows 11) na janela flutuante única da HUD (self.root):
+        - Zero WS_EX_LAYERED quando desbloqueado (recorte puro SetWindowRgn + DWM hardware-clipped)
         - Sem usar ShowWindow nem loops de <Map> (zero piscadas / zero interferência no cursor!)
         - Desativa sombra/borda/cantos arredondados pesados do DWM (DWMWCP_DONOTROUND + DWMNCRP_DISABLED)
-        - Aplica WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE (preservando LWA_COLORKEY puro sem LWA_ALPHA)
+        - Aplica WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
         """
         if sys.platform != "win32":
             return
@@ -2600,10 +2636,11 @@ class OverlayDPSMeter:
             dwmapi.DwmSetWindowAttribute(hwnd, 12, ctypes.byref(val_one), 4)  # DWMWA_EXCLUDED_FROM_PEEK = 1
             dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(val_one), 4)  # DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND (1)
 
-            # 2. Configura estilos estendidos Win32 na HUD sem esconder/mostrar a janela
+            # 2. Configura estilos estendidos Win32 sem WS_EX_LAYERED no modo desbloqueado
             GWL_EXSTYLE       = -20
             WS_EX_TRANSPARENT = 0x00000020
             WS_EX_TOOLWINDOW  = 0x00000080
+            WS_EX_LAYERED     = 0x00080000
             WS_EX_NOACTIVATE  = 0x08000000
 
             get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
@@ -2612,21 +2649,20 @@ class OverlayDPSMeter:
             ex_style = get_long(hwnd, GWL_EXSTYLE)
             ex_style |= (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
             if self._win32_transparent_applied:
-                ex_style |= WS_EX_TRANSPARENT
+                ex_style |= (WS_EX_TRANSPARENT | WS_EX_LAYERED)
             else:
-                ex_style &= ~WS_EX_TRANSPARENT
+                ex_style &= ~(WS_EX_TRANSPARENT | WS_EX_LAYERED)
             set_long(hwnd, GWL_EXSTYLE, ex_style)
+            if self._win32_transparent_applied:
+                user32.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
 
-            # 3. Garante estritamente LWA_COLORKEY (flags=1) SEM LWA_ALPHA (flags|=2 que o Tcl/Tk ativa por padrão),
-            #    mantendo compatibilidade total com DX12 Direct Flip / MPO / AMD Fluid Motion Frames!
-            r_k, g_k, b_k = TRANSPARENT_RGB[0], TRANSPARENT_RGB[1], TRANSPARENT_RGB[2]
-            cr_key = (b_k << 16) | (g_k << 8) | r_k
-            user32.SetLayeredWindowAttributes(hwnd, cr_key, 0, 1)
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)
+            self._update_window_region()
         except Exception:
             pass
 
     def _set_win32_transparent(self, transparent):
-        """Ativa/desativa WS_EX_TRANSPARENT sob demanda sem recriar a janela."""
+        """Ativa/desativa WS_EX_LAYERED | WS_EX_TRANSPARENT sob demanda sem manter layered no modo normal."""
         if sys.platform != "win32" or transparent == self._win32_transparent_applied:
             return
         self._win32_transparent_applied = transparent
@@ -2634,6 +2670,7 @@ class OverlayDPSMeter:
             user32 = ctypes.windll.user32
             GWL_EXSTYLE       = -20
             WS_EX_TRANSPARENT = 0x00000020
+            WS_EX_LAYERED     = 0x00080000
             get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
             set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
 
@@ -2641,10 +2678,15 @@ class OverlayDPSMeter:
             if hwnd:
                 ex_style = get_long(hwnd, GWL_EXSTYLE)
                 if transparent:
-                    ex_style |= WS_EX_TRANSPARENT
+                    ex_style |= (WS_EX_TRANSPARENT | WS_EX_LAYERED)
+                    set_long(hwnd, GWL_EXSTYLE, ex_style)
+                    user32.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
                 else:
-                    ex_style &= ~WS_EX_TRANSPARENT
-                set_long(hwnd, GWL_EXSTYLE, ex_style)
+                    ex_style &= ~(WS_EX_TRANSPARENT | WS_EX_LAYERED)
+                    set_long(hwnd, GWL_EXSTYLE, ex_style)
+                    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)
+                    user32.InvalidateRect(hwnd, None, True)
+                self._update_window_region()
         except Exception:
             pass
 
@@ -3239,6 +3281,7 @@ class OverlayDPSMeter:
         new_h = (MONSTER_BAR_H + 3) + count * (PLAYER_BAR_H + 3)
         self._cur_win_h = new_h
         self.root.geometry(f"{HUD_WIDTH}x{new_h}")
+        self._update_window_region(count)
 
     def _get_fight_duration(self):
         """
