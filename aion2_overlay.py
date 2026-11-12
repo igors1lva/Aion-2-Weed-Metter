@@ -31,8 +31,42 @@ if sys.platform == "win32" and sys.stdout is not None:
         pass
 
 if sys.platform == "win32":
+    from ctypes import wintypes
+
     class _Win32Point(ctypes.Structure):
         _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    _win32_user = ctypes.WinDLL("user32")
+    _win32_gdi  = ctypes.WinDLL("gdi32")
+    _win32_dwm  = ctypes.WinDLL("dwmapi")
+
+    _win32_gdi.CreateRoundRectRgn.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    _win32_gdi.CreateRoundRectRgn.restype  = wintypes.HRGN
+    _win32_gdi.CombineRgn.argtypes         = [wintypes.HRGN, wintypes.HRGN, wintypes.HRGN, ctypes.c_int]
+    _win32_gdi.CombineRgn.restype          = ctypes.c_int
+    _win32_gdi.DeleteObject.argtypes       = [wintypes.HGDIOBJ]
+    _win32_gdi.DeleteObject.restype        = wintypes.BOOL
+
+    _win32_user.GetParent.argtypes                   = [wintypes.HWND]
+    _win32_user.GetParent.restype                    = wintypes.HWND
+    _win32_user.SetWindowRgn.argtypes                = [wintypes.HWND, wintypes.HRGN, wintypes.BOOL]
+    _win32_user.SetWindowRgn.restype                 = ctypes.c_int
+    _win32_user.SetWindowPos.argtypes                = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    _win32_user.SetWindowPos.restype                 = wintypes.BOOL
+    _win32_user.SetLayeredWindowAttributes.argtypes  = [wintypes.HWND, wintypes.COLORREF, wintypes.BYTE, wintypes.DWORD]
+    _win32_user.SetLayeredWindowAttributes.restype   = wintypes.BOOL
+    _win32_user.InvalidateRect.argtypes              = [wintypes.HWND, ctypes.c_void_p, wintypes.BOOL]
+    _win32_user.InvalidateRect.restype               = wintypes.BOOL
+
+    _get_win_long = getattr(_win32_user, "GetWindowLongPtrW", _win32_user.GetWindowLongW)
+    _set_win_long = getattr(_win32_user, "SetWindowLongPtrW", _win32_user.SetWindowLongW)
+    _get_win_long.argtypes = [wintypes.HWND, ctypes.c_int]
+    _get_win_long.restype  = ctypes.c_ssize_t
+    _set_win_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    _set_win_long.restype  = ctypes.c_ssize_t
+
+    _win32_dwm.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    _win32_dwm.DwmSetWindowAttribute.restype  = ctypes.c_long
 
 TSHARK_PATH          = r"C:\Program Files\Wireshark\tshark.exe"
 DEFAULT_INTERFACE    = "auto"       # Detecção automática de adaptador Npcap / IP ativo
@@ -2563,7 +2597,7 @@ class OverlayDPSMeter:
             return 0
         try:
             hwnd = win.winfo_id()
-            parent = ctypes.windll.user32.GetParent(hwnd)
+            parent = _win32_user.GetParent(hwnd)
             return parent if parent else hwnd
         except Exception:
             return 0
@@ -2586,28 +2620,24 @@ class OverlayDPSMeter:
             hwnd = self._get_win_hwnd(self.root)
             if not hwnd:
                 return
-            gdi32 = ctypes.windll.gdi32
-            user32 = ctypes.windll.user32
             n_rows = getattr(self, "visible_rows", 1) if count is None else max(1, count)
 
-            combined = gdi32.CreateRoundRectRgn(0, 0, HUD_WIDTH + 1, MONSTER_BAR_H + 1, 12, 12)
+            combined = _win32_gdi.CreateRoundRectRgn(0, 0, HUD_WIDTH + 1, MONSTER_BAR_H + 1, 12, 12)
             if not combined:
                 return
 
-            y0 = self.bars_container.winfo_y() if hasattr(self, "bars_container") else 0
-            if y0 <= MONSTER_BAR_H:
-                y0 = MONSTER_BAR_H + 4
+            y0 = MONSTER_BAR_H + 4
 
             RGN_OR = 2
             for i in range(n_rows):
                 ry = y0 + i * (PLAYER_BAR_H + 3)
-                row_rgn = gdi32.CreateRoundRectRgn(0, ry, HUD_WIDTH + 1, ry + PLAYER_BAR_H + 1, 12, 12)
+                row_rgn = _win32_gdi.CreateRoundRectRgn(0, ry, HUD_WIDTH + 1, ry + PLAYER_BAR_H + 1, 12, 12)
                 if row_rgn:
-                    gdi32.CombineRgn(combined, combined, row_rgn, RGN_OR)
-                    gdi32.DeleteObject(row_rgn)
+                    _win32_gdi.CombineRgn(combined, combined, row_rgn, RGN_OR)
+                    _win32_gdi.DeleteObject(row_rgn)
 
-            if not user32.SetWindowRgn(hwnd, combined, True):
-                gdi32.DeleteObject(combined)
+            if not _win32_user.SetWindowRgn(hwnd, combined, True):
+                _win32_gdi.DeleteObject(combined)
         except Exception:
             pass
 
@@ -2626,15 +2656,12 @@ class OverlayDPSMeter:
             if not hwnd:
                 return
 
-            user32 = ctypes.windll.user32
-            dwmapi = ctypes.windll.dwmapi
-
             # 1. Desativa shaders pesados de composição Não-Cliente do DWM no Windows 11
             val_one = ctypes.c_int(1)
-            dwmapi.DwmSetWindowAttribute(hwnd, 2, ctypes.byref(val_one), 4)   # DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED (1)
-            dwmapi.DwmSetWindowAttribute(hwnd, 3, ctypes.byref(val_one), 4)   # DWMWA_TRANSITIONS_FORCEDISABLED = 1
-            dwmapi.DwmSetWindowAttribute(hwnd, 12, ctypes.byref(val_one), 4)  # DWMWA_EXCLUDED_FROM_PEEK = 1
-            dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(val_one), 4)  # DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND (1)
+            _win32_dwm.DwmSetWindowAttribute(hwnd, 2, ctypes.byref(val_one), 4)   # DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED (1)
+            _win32_dwm.DwmSetWindowAttribute(hwnd, 3, ctypes.byref(val_one), 4)   # DWMWA_TRANSITIONS_FORCEDISABLED = 1
+            _win32_dwm.DwmSetWindowAttribute(hwnd, 12, ctypes.byref(val_one), 4)  # DWMWA_EXCLUDED_FROM_PEEK = 1
+            _win32_dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(val_one), 4)  # DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND (1)
 
             # 2. Configura estilos estendidos Win32 sem WS_EX_LAYERED no modo desbloqueado
             GWL_EXSTYLE       = -20
@@ -2643,20 +2670,17 @@ class OverlayDPSMeter:
             WS_EX_LAYERED     = 0x00080000
             WS_EX_NOACTIVATE  = 0x08000000
 
-            get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
-            set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
-
-            ex_style = get_long(hwnd, GWL_EXSTYLE)
+            ex_style = _get_win_long(hwnd, GWL_EXSTYLE)
             ex_style |= (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
             if self._win32_transparent_applied:
                 ex_style |= (WS_EX_TRANSPARENT | WS_EX_LAYERED)
             else:
                 ex_style &= ~(WS_EX_TRANSPARENT | WS_EX_LAYERED)
-            set_long(hwnd, GWL_EXSTYLE, ex_style)
+            _set_win_long(hwnd, GWL_EXSTYLE, ex_style)
             if self._win32_transparent_applied:
-                user32.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
+                _win32_user.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
 
-            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)
+            _win32_user.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)
             self._update_window_region()
         except Exception:
             pass
@@ -2667,25 +2691,22 @@ class OverlayDPSMeter:
             return
         self._win32_transparent_applied = transparent
         try:
-            user32 = ctypes.windll.user32
             GWL_EXSTYLE       = -20
             WS_EX_TRANSPARENT = 0x00000020
             WS_EX_LAYERED     = 0x00080000
-            get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
-            set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
 
             hwnd = self._get_win_hwnd(self.root)
             if hwnd:
-                ex_style = get_long(hwnd, GWL_EXSTYLE)
+                ex_style = _get_win_long(hwnd, GWL_EXSTYLE)
                 if transparent:
                     ex_style |= (WS_EX_TRANSPARENT | WS_EX_LAYERED)
-                    set_long(hwnd, GWL_EXSTYLE, ex_style)
-                    user32.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
+                    _set_win_long(hwnd, GWL_EXSTYLE, ex_style)
+                    _win32_user.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
                 else:
                     ex_style &= ~(WS_EX_TRANSPARENT | WS_EX_LAYERED)
-                    set_long(hwnd, GWL_EXSTYLE, ex_style)
-                    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)
-                    user32.InvalidateRect(hwnd, None, True)
+                    _set_win_long(hwnd, GWL_EXSTYLE, ex_style)
+                    _win32_user.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)
+                    _win32_user.InvalidateRect(hwnd, None, True)
                 self._update_window_region()
         except Exception:
             pass
@@ -3038,9 +3059,9 @@ class OverlayDPSMeter:
         _bind_btn(b_close, self.on_close)
 
     def build_ui(self):
-        # Janela Única Otimizada (DirectX 12 / AMD Frame Gen): barras, ícones e textos no mesmo Canvas
+        # Janela Única Otimizada (DirectX 12 / AMD Frame Gen): barras, ícones e textos em canvas plano (zero frames/child HWNDs por linha)
         self.monster_frame = tk.Frame(self.root, bg=TRANSPARENT_KEY, width=HUD_WIDTH, height=MONSTER_BAR_H)
-        self.monster_frame.pack(fill=tk.X, pady=(0, 4))
+        self.monster_frame.place(x=0, y=0, width=HUD_WIDTH, height=MONSTER_BAR_H)
         self.monster_frame.pack_propagate(False)
 
         mc = tk.Canvas(
@@ -3081,44 +3102,48 @@ class OverlayDPSMeter:
         self.btn_pause = self.btns_pause[-1]
         self.btn_lock  = self.btns_lock[-1]
 
-        self.bars_container = tk.Frame(self.root, bg=TRANSPARENT_KEY)
-        self.bars_container.pack(fill=tk.BOTH, expand=True)
-        self.rows = [self._make_row(self.bars_container, i) for i in range(6)]
-
-    def _make_row(self, parent, idx):
-        f = tk.Frame(parent, bg=TRANSPARENT_KEY, width=HUD_WIDTH, height=PLAYER_BAR_H)
-        f.pack_propagate(False)
-
-        c = tk.Canvas(
-            f, bg=TRANSPARENT_KEY,
-            width=HUD_WIDTH, height=PLAYER_BAR_H,
+        max_rows = 6
+        bars_h = max_rows * (PLAYER_BAR_H + 3)
+        self.bars_canvas = tk.Canvas(
+            self.root, bg=TRANSPARENT_KEY,
+            width=HUD_WIDTH, height=bars_h,
             highlightthickness=0, bd=0
         )
-        c.pack(fill=tk.BOTH, expand=True)
+        self.bars_canvas.place(x=0, y=MONSTER_BAR_H + 4, width=HUD_WIDTH, height=bars_h)
+        self.bars_container = self.bars_canvas
+        self.bars_canvas.bind("<ButtonPress-1>", self.start_move)
+        self.bars_canvas.bind("<B1-Motion>", self.do_move)
+        self.bars_canvas.bind("<ButtonRelease-1>", self.on_bar_release)
+        self.bars_canvas.bind(
+            "<Button-3>",
+            lambda e: self.edit_row_player(max(0, min(max(0, self.visible_rows - 1), int(e.y // (PLAYER_BAR_H + 3)))))
+        )
+        self.bars_canvas.bind("<Enter>", self.on_hover_enter)
+        self.bars_canvas.bind("<Leave>", self.on_hover_leave)
+        self.rows = [self._make_row(self.bars_canvas, i) for i in range(max_rows)]
 
-        pill_img  = c.create_image(0, 0, anchor="nw")
-        rank_txt  = c.create_text(12, 15, text="", anchor="center", fill="#cbd5e1", font=("Segoe UI", 9, "bold"))
-        icon_img  = c.create_image(28, 15, anchor="center")
-        name_txt  = c.create_text(44, 15, text="", anchor="w", fill="#ffffff", font=("Segoe UI", 10, "bold"))
-        cp_img    = c.create_image(118, 15, anchor="w")
-        cp_txt    = c.create_text(132, 15, text="", anchor="w", fill="#38bdf8", font=("Segoe UI", 8, "bold"))
-        death_img = c.create_image(172, 15, anchor="w")
-        death_txt = c.create_text(188, 15, text="", anchor="w", fill="#f87171", font=("Segoe UI", 8, "bold"))
+    def _make_row(self, c, idx):
+        y0 = idx * (PLAYER_BAR_H + 3)
+        cy = y0 + 15
+        row_tag = f"row_{idx}"
 
-        dmg_txt   = c.create_text(HUD_WIDTH - 178, 15, text="", anchor="e", fill="#ffffff", font=("Segoe UI", 10, "bold"))
-        dps_txt   = c.create_text(HUD_WIDTH - 120, 15, text="", anchor="e", fill="#cbd5e1", font=("Segoe UI", 9))
-        crit_txt  = c.create_text(HUD_WIDTH - 52,  15, text="", anchor="e", fill="#fbbf24", font=("Segoe UI", 8, "bold"))
-        share_txt = c.create_text(HUD_WIDTH - 8,   15, text="", anchor="e", fill="#cbd5e1", font=("Segoe UI", 9))
+        pill_img  = c.create_image(0, y0, anchor="nw", tags=(row_tag,), state="hidden")
+        rank_txt  = c.create_text(12, cy, text="", anchor="center", fill="#cbd5e1", font=("Segoe UI", 9, "bold"), tags=(row_tag,), state="hidden")
+        icon_img  = c.create_image(28, cy, anchor="center", tags=(row_tag,), state="hidden")
+        name_txt  = c.create_text(44, cy, text="", anchor="w", fill="#ffffff", font=("Segoe UI", 10, "bold"), tags=(row_tag,), state="hidden")
+        cp_img    = c.create_image(118, cy, anchor="w", tags=(row_tag,), state="hidden")
+        cp_txt    = c.create_text(132, cy, text="", anchor="w", fill="#38bdf8", font=("Segoe UI", 8, "bold"), tags=(row_tag,), state="hidden")
+        death_img = c.create_image(172, cy, anchor="w", tags=(row_tag,), state="hidden")
+        death_txt = c.create_text(188, cy, text="", anchor="w", fill="#f87171", font=("Segoe UI", 8, "bold"), tags=(row_tag,), state="hidden")
 
-        c.bind("<ButtonPress-1>", self.start_move)
-        c.bind("<B1-Motion>", self.do_move)
-        c.bind("<ButtonRelease-1>", self.on_bar_release)
-        c.bind("<Button-3>", lambda e, i=idx: self.edit_row_player(i))
-        c.bind("<Enter>", self.on_hover_enter)
-        c.bind("<Leave>", self.on_hover_leave)
+        dmg_txt   = c.create_text(HUD_WIDTH - 178, cy, text="", anchor="e", fill="#ffffff", font=("Segoe UI", 10, "bold"), tags=(row_tag,), state="hidden")
+        dps_txt   = c.create_text(HUD_WIDTH - 120, cy, text="", anchor="e", fill="#cbd5e1", font=("Segoe UI", 9), tags=(row_tag,), state="hidden")
+        crit_txt  = c.create_text(HUD_WIDTH - 52,  cy, text="", anchor="e", fill="#fbbf24", font=("Segoe UI", 8, "bold"), tags=(row_tag,), state="hidden")
+        share_txt = c.create_text(HUD_WIDTH - 8,   cy, text="", anchor="e", fill="#cbd5e1", font=("Segoe UI", 9), tags=(row_tag,), state="hidden")
 
         return {
-            "idx": idx, "frame": f, "c": c, "pill": pill_img, "rank": rank_txt, "img": icon_img,
+            "idx": idx, "frame": None, "c": c, "y0": y0, "cy": cy, "tag": row_tag,
+            "pill": pill_img, "rank": rank_txt, "img": icon_img,
             "name": name_txt, "cp_img": cp_img, "cp": cp_txt,
             "death_img": death_img, "death": death_txt,
             "col1": dmg_txt, "col2": dps_txt, "col3": crit_txt, "col4": share_txt,
@@ -3195,6 +3220,7 @@ class OverlayDPSMeter:
             name_end = (bbox_n[2] + pad_offset) if bbox_n else (46 + len(name_str) * 7 + pad_offset)
             row["_last_name_end"] = name_end
 
+        cy = row.get("cy", 15)
         if cp_str:
             if show_cp_icon and hasattr(self, "cp_icons") and self.cp_icons:
                 cp_is_track = (name_end >= bar_w)
@@ -3203,7 +3229,7 @@ class OverlayDPSMeter:
                     c.itemconfig(row["cp_img"], image=cp_ic)
                     row["_last_cp_img"] = cp_ic
                 if name_end != row.get("_last_cp_img_x"):
-                    c.coords(row["cp_img"], name_end, 15)
+                    c.coords(row["cp_img"], name_end, cy)
                     row["_last_cp_img_x"] = name_end
                 cp_txt_x = name_end + 14
             else:
@@ -3212,7 +3238,7 @@ class OverlayDPSMeter:
                     row["_last_cp_img"] = ""
                 cp_txt_x = name_end
             if cp_txt_x != row.get("_last_cp_x"):
-                c.coords(row["cp"], cp_txt_x, 15)
+                c.coords(row["cp"], cp_txt_x, cy)
                 row["_last_cp_x"] = cp_txt_x
                 row["_last_after_cp_x"] = None
             after_cp_x = row.get("_last_after_cp_x")
@@ -3234,13 +3260,13 @@ class OverlayDPSMeter:
                     c.itemconfig(row["death_img"], image=sk_ic)
                     row["_last_death_img"] = sk_ic
                 if after_cp_x != row.get("_last_death_img_x"):
-                    c.coords(row["death_img"], after_cp_x, 15)
+                    c.coords(row["death_img"], after_cp_x, cy)
                     row["_last_death_img_x"] = after_cp_x
                 death_txt_x = after_cp_x + 16
             else:
                 death_txt_x = after_cp_x
             if death_txt_x != row.get("_last_death_x"):
-                c.coords(row["death"], death_txt_x, 15)
+                c.coords(row["death"], death_txt_x, cy)
                 row["_last_death_x"] = death_txt_x
         else:
             if row.get("_last_death_img"):
@@ -3267,20 +3293,22 @@ class OverlayDPSMeter:
         count = max(1, min(len(self.rows), count))
         if count == self.visible_rows:
             return
+        c = getattr(self, "bars_canvas", None)
         for i in range(len(self.rows)):
             r = self.rows[i]
-            if i < count:
-                if not r["packed"]:
-                    r["frame"].pack(fill=tk.X, pady=(0, 3))
-                    r["packed"] = True
-            else:
-                if r["packed"]:
-                    r["frame"].pack_forget()
-                    r["packed"] = False
+            want = (i < count)
+            if r["packed"] != want:
+                r["packed"] = want
+                if c is not None and r.get("tag"):
+                    c.itemconfigure(r["tag"], state=("normal" if want else "hidden"))
         self.visible_rows = count
-        new_h = (MONSTER_BAR_H + 3) + count * (PLAYER_BAR_H + 3)
+        new_h = (MONSTER_BAR_H + 4) + count * (PLAYER_BAR_H + 3)
         self._cur_win_h = new_h
         self.root.geometry(f"{HUD_WIDTH}x{new_h}")
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
         self._update_window_region(count)
 
     def _get_fight_duration(self):
