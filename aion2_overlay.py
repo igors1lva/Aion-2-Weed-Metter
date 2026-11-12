@@ -1915,7 +1915,10 @@ class SnifferThread(threading.Thread):
                 ]
                 log(f"[Sniffer] Tentando capturar na interface: {iface} (porta {SERVER_PORT})...")
                 try:
-                    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                    creation_flags = (
+                        (subprocess.CREATE_NO_WINDOW | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000))
+                        if sys.platform == "win32" else 0
+                    )
                     self.proc = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         text=True, bufsize=1, creationflags=creation_flags
@@ -2414,23 +2417,13 @@ class OverlayDPSMeter:
         self.taskbar_win.bind("<Unmap>", self._on_taskbar_unmap)
         self.taskbar_win.bind("<Map>", self._on_taskbar_map)
 
-        # 2. Sistema Dual-Layer: Fundo translúcido (60% opacidade) + Frente 100% opaca (textos/números nítidos)
-        self.bar_opacity = 0.60
-
-        # Layer 1 (Fundo): Barras das classes, HP do monstro e menu com 60% de opacidade
-        self.bg_win = tk.Toplevel(self.taskbar_win)
-        self.bg_win.title("Aion 2 Weed Metter Background")
-        self.bg_win.overrideredirect(True)
-        self.bg_win.geometry(f"{HUD_WIDTH}x68+80+80")
-        self.bg_win.attributes("-topmost", True)
-        self.bg_win.configure(bg=TRANSPARENT_KEY)
-        try:
-            self.bg_win.attributes("-transparentcolor", TRANSPARENT_KEY)
-            self.bg_win.attributes("-alpha", self.bar_opacity)
-        except Exception:
-            pass
-
-        # Layer 2 (Frente): Textos, números, CP e ícones 100% sólidos/opacos para máxima nitidez
+        # 2. Janela Única Flutuante da HUD Otimizada para DirectX 12 / AMD Frame Gen (AFMF) / Windows 11 MPO:
+        #    Usa APENAS UMA janela (self.root) com LWA_COLORKEY (-transparentcolor), SEM bg_win e SEM -alpha (LWA_ALPHA),
+        #    evitando composição alpha dupla no DWM que derruba FPS no Aion 2 com Frame Generation!
+        self.bg_win = None
+        self.bg_monster_canvas = None
+        self.bg_hover_frame = None
+        self.bg_rows = []
         self.root = tk.Toplevel(self.taskbar_win)
         self.root.title("Aion 2 Weed Metter")
         self.root.overrideredirect(True)
@@ -2439,7 +2432,6 @@ class OverlayDPSMeter:
         self.root.configure(bg=TRANSPARENT_KEY)
         try:
             self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
-            self.root.attributes("-alpha", 1.0)
         except Exception:
             pass
 
@@ -2581,27 +2573,15 @@ class OverlayDPSMeter:
         return self._get_win_hwnd(self.root)
 
     def _enforce_z_order(self):
-        """Garante que self.root (textos/botões) fique SEMPRE estritamente acima de self.bg_win (fundo 60%)."""
-        if sys.platform != "win32":
-            return
-        try:
-            user32 = ctypes.windll.user32
-            flags = 0x0001 | 0x0002 | 0x0010  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
-            h_fg = self._get_win_hwnd(self.root)
-            h_bg = self._get_win_hwnd(self.bg_win) if hasattr(self, "bg_win") and self.bg_win else 0
-            if h_fg:
-                user32.SetWindowPos(h_fg, -1, 0, 0, 0, 0, flags)  # HWND_TOPMOST (-1)
-            if h_bg and h_fg:
-                user32.SetWindowPos(h_bg, h_fg, 0, 0, 0, 0, flags)  # Coloca bg_win imediatamente atrás de root
-        except Exception:
-            pass
+        """Com janela única otimizada para DX12/AFMF, não precisa ficar chamando SetWindowPos entre 2 camadas."""
+        return
 
     def _apply_win32_overlay_styles(self):
         """
-        Configura atributos nativos Win32 e DWM (Windows 11) na janela flutuante da HUD (self.root e self.bg_win):
+        Configura atributos nativos Win32 e DWM (Windows 11) na janela flutuante única da HUD (self.root):
         - Sem usar ShowWindow nem loops de <Map> (zero piscadas / zero interferência no cursor!)
         - Desativa sombra/borda/cantos arredondados pesados do DWM (DWMWCP_DONOTROUND + DWMNCRP_DISABLED)
-        - Aplica WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE em ambas as janelas para que clicar/arrastar nunca roube foco nem inverta Z-order!
+        - Aplica WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE (preservando LWA_COLORKEY puro sem LWA_ALPHA)
         """
         if sys.platform != "win32":
             return
@@ -2637,26 +2617,11 @@ class OverlayDPSMeter:
                 ex_style &= ~WS_EX_TRANSPARENT
             set_long(hwnd, GWL_EXSTYLE, ex_style)
 
-            # Configura bg_win usando o HWND real de topo (_get_win_hwnd):
-            if hasattr(self, "bg_win") and self.bg_win:
-                try:
-                    hwnd_bg = self._get_win_hwnd(self.bg_win)
-                    if hwnd_bg:
-                        dwmapi.DwmSetWindowAttribute(hwnd_bg, 2, ctypes.byref(val_one), 4)
-                        dwmapi.DwmSetWindowAttribute(hwnd_bg, 3, ctypes.byref(val_one), 4)
-                        dwmapi.DwmSetWindowAttribute(hwnd_bg, 12, ctypes.byref(val_one), 4)
-                        dwmapi.DwmSetWindowAttribute(hwnd_bg, 33, ctypes.byref(val_one), 4)
-
-                        ex_bg = get_long(hwnd_bg, GWL_EXSTYLE)
-                        ex_bg |= (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
-                        if self._win32_transparent_applied:
-                            ex_bg |= WS_EX_TRANSPARENT
-                        else:
-                            ex_bg &= ~WS_EX_TRANSPARENT
-                        set_long(hwnd_bg, GWL_EXSTYLE, ex_bg)
-                except Exception:
-                    pass
-            self._enforce_z_order()
+            # 3. Garante estritamente LWA_COLORKEY (flags=1) SEM LWA_ALPHA (flags|=2 que o Tcl/Tk ativa por padrão),
+            #    mantendo compatibilidade total com DX12 Direct Flip / MPO / AMD Fluid Motion Frames!
+            r_k, g_k, b_k = TRANSPARENT_RGB[0], TRANSPARENT_RGB[1], TRANSPARENT_RGB[2]
+            cr_key = (b_k << 16) | (g_k << 8) | r_k
+            user32.SetLayeredWindowAttributes(hwnd, cr_key, 0, 1)
         except Exception:
             pass
 
@@ -2680,16 +2645,6 @@ class OverlayDPSMeter:
                 else:
                     ex_style &= ~WS_EX_TRANSPARENT
                 set_long(hwnd, GWL_EXSTYLE, ex_style)
-
-            if hasattr(self, "bg_win") and self.bg_win:
-                hwnd_bg = self._get_win_hwnd(self.bg_win)
-                if hwnd_bg:
-                    ex_bg = get_long(hwnd_bg, GWL_EXSTYLE)
-                    if transparent:
-                        ex_bg |= WS_EX_TRANSPARENT
-                    else:
-                        ex_bg &= ~WS_EX_TRANSPARENT
-                    set_long(hwnd_bg, GWL_EXSTYLE, ex_bg)
         except Exception:
             pass
 
@@ -2698,25 +2653,21 @@ class OverlayDPSMeter:
             self.is_hovered = True
             self.hover_frame.place(x=HUD_WIDTH - 144, y=2, width=140, height=22)
             self.hover_frame.lift()
-            if hasattr(self, "bg_hover_frame") and self.bg_hover_frame:
-                self.bg_hover_frame.place(x=HUD_WIDTH - 144, y=2, width=140, height=22)
-                self.bg_hover_frame.lift()
             self.monster_canvas.itemconfigure(self.m_info_txt, state="hidden")
             if hasattr(self, "m_ttd_txt"):
                 self.monster_canvas.itemconfigure(self.m_ttd_txt, state="hidden")
             if hasattr(self, "m_info_left"):
                 self.monster_canvas.itemconfigure(self.m_info_left, state="hidden")
-            self._enforce_z_order()
+            self._m_last_hidden = True
         elif not show and self.is_hovered:
             self.is_hovered = False
             self.hover_frame.place_forget()
-            if hasattr(self, "bg_hover_frame") and self.bg_hover_frame:
-                self.bg_hover_frame.place_forget()
             self.monster_canvas.itemconfigure(self.m_info_txt, state="normal")
             if hasattr(self, "m_ttd_txt"):
                 self.monster_canvas.itemconfigure(self.m_ttd_txt, state="normal")
             if hasattr(self, "m_info_left"):
                 self.monster_canvas.itemconfigure(self.m_info_left, state="normal")
+            self._m_last_hidden = False
 
     def _sync_hover_and_click_through(self):
         """
@@ -2820,19 +2771,6 @@ class OverlayDPSMeter:
         self._cur_win_x = x
         self._cur_win_y = y
         self.root.geometry(f"+{x}+{y}")
-        if hasattr(self, "bg_win") and self.bg_win:
-            self.bg_win.geometry(f"+{x}+{y}")
-        if sys.platform == "win32":
-            try:
-                flags = 0x0001 | 0x0010  # SWP_NOSIZE | SWP_NOACTIVATE (mantém root acima de bg_win!)
-                h_fg = self._get_win_hwnd(self.root)
-                h_bg = self._get_win_hwnd(self.bg_win) if hasattr(self, "bg_win") and self.bg_win else 0
-                if h_fg:
-                    ctypes.windll.user32.SetWindowPos(h_fg, -1, x, y, 0, 0, flags)
-                if h_bg and h_fg:
-                    ctypes.windll.user32.SetWindowPos(h_bg, h_fg, x, y, 0, 0, flags)
-            except Exception:
-                pass
 
     def on_bar_release(self, event):
         if self.is_click_through:
@@ -2981,7 +2919,8 @@ class OverlayDPSMeter:
         self._sync_hover_and_click_through()
 
     def on_hover_leave(self, event=None):
-        self.root.after(120, self._sync_hover_and_click_through)
+        # _sync_hover_and_click_through já roda no ciclo de 120ms de update_loop; evita duplicar timers
+        return
 
     def toggle_boss_only(self):
         self.boss_only = not self.boss_only
@@ -3057,39 +2996,7 @@ class OverlayDPSMeter:
         _bind_btn(b_close, self.on_close)
 
     def build_ui(self):
-        # ─────────────────────────────────────────────────────────────
-        # 1. LAYER 1 (Fundo - bg_win): Barra Vermelha do Boss + Fundo das Barras + Menu com 60% Opacidade
-        # ─────────────────────────────────────────────────────────────
-        self.bg_monster_frame = tk.Frame(self.bg_win, bg=TRANSPARENT_KEY, width=HUD_WIDTH, height=MONSTER_BAR_H)
-        self.bg_monster_frame.pack(fill=tk.X, pady=(0, 4))
-        self.bg_monster_frame.pack_propagate(False)
-
-        self.bg_monster_canvas = tk.Canvas(
-            self.bg_monster_frame, bg=TRANSPARENT_KEY,
-            width=HUD_WIDTH, height=MONSTER_BAR_H,
-            highlightthickness=0, bd=0
-        )
-        self.bg_monster_canvas.pack(fill=tk.BOTH, expand=True)
-        self.m_bg_img = self.bg_monster_canvas.create_image(0, 0, anchor="nw")
-
-        # Vincula eventos de arraste, clique e hover diretamente no canvas do monstro no fundo
-        self.bg_monster_canvas.bind("<ButtonPress-1>", self.start_move)
-        self.bg_monster_canvas.bind("<B1-Motion>", self.do_move)
-        self.bg_monster_canvas.bind("<Button-3>", lambda e: self.edit_player_name())
-        self.bg_monster_canvas.bind("<Enter>", self.on_hover_enter)
-        self.bg_monster_canvas.bind("<Leave>", self.on_hover_leave)
-
-        # Menu de controles espelhado no bg_win (garante clique 100% mesmo se clicado no layer de fundo)
-        self.bg_hover_frame = tk.Frame(self.bg_monster_frame, bg="#18141a")
-        self._populate_control_buttons(self.bg_hover_frame)
-
-        self.bg_bars_container = tk.Frame(self.bg_win, bg=TRANSPARENT_KEY)
-        self.bg_bars_container.pack(fill=tk.BOTH, expand=True)
-        self.bg_rows = [self._make_bg_row(self.bg_bars_container, i) for i in range(6)]
-
-        # ─────────────────────────────────────────────────────────────
-        # 2. LAYER 2 (Frente - root): Textos, Números, Ícones e Botões 100% Sólidos e Nítidos
-        # ─────────────────────────────────────────────────────────────
+        # Janela Única Otimizada (DirectX 12 / AMD Frame Gen): barras, ícones e textos no mesmo Canvas
         self.monster_frame = tk.Frame(self.root, bg=TRANSPARENT_KEY, width=HUD_WIDTH, height=MONSTER_BAR_H)
         self.monster_frame.pack(fill=tk.X, pady=(0, 4))
         self.monster_frame.pack_propagate(False)
@@ -3102,16 +3009,23 @@ class OverlayDPSMeter:
         mc.pack(fill=tk.BOTH, expand=True)
         self.monster_canvas = mc
 
+        self.m_bg_img     = mc.create_image(0, 0, anchor="nw")
         self.m_name_txt   = mc.create_text(12, 13, text="Aguardando Alvo", anchor="w", fill="#ffffff", font=("Segoe UI", 9, "bold"))
         self.m_info_txt   = mc.create_text(HUD_WIDTH - 10, 13, text="", anchor="e", fill="#ffffff", font=("Segoe UI", 9, "bold"))
         self.m_ttd_txt    = mc.create_text(HUD_WIDTH - 50, 13, text="", anchor="e", fill="#f87171", font=("Segoe UI", 9, "bold"))
         self.m_info_left  = mc.create_text(HUD_WIDTH - 120, 13, text="", anchor="e", fill="#ffffff", font=("Segoe UI", 9, "bold"))
-        self._m_last_pill  = None
-        self._m_last_name  = None
-        self._m_last_info  = None
-        self._m_last_color = None
-        self._m_last_ttd   = None
-        self._m_last_left  = None
+        self._m_last_pill     = None
+        self._m_last_name     = None
+        self._m_last_raw_name = None
+        self._m_last_avail_w  = None
+        self._m_last_info     = None
+        self._m_last_color    = None
+        self._m_last_info_x   = None
+        self._m_last_ttd      = None
+        self._m_last_ttd_x    = None
+        self._m_last_left     = None
+        self._m_last_left_x   = None
+        self._m_last_hidden   = False
 
         mc.bind("<ButtonPress-1>", self.start_move)
         mc.bind("<B1-Motion>", self.do_move)
@@ -3119,7 +3033,6 @@ class OverlayDPSMeter:
         mc.bind("<Enter>", self.on_hover_enter)
         mc.bind("<Leave>", self.on_hover_leave)
 
-        # Controles interativos no foreground (botões 100% nítidos com fundo sólido para captura de cliques)
         self.hover_frame = tk.Frame(self.monster_frame, bg="#18141a")
         self._populate_control_buttons(self.hover_frame)
         self.btn_mode  = self.btns_mode[-1]
@@ -3129,26 +3042,6 @@ class OverlayDPSMeter:
         self.bars_container = tk.Frame(self.root, bg=TRANSPARENT_KEY)
         self.bars_container.pack(fill=tk.BOTH, expand=True)
         self.rows = [self._make_row(self.bars_container, i) for i in range(6)]
-
-    def _make_bg_row(self, parent, idx):
-        f = tk.Frame(parent, bg=TRANSPARENT_KEY, width=HUD_WIDTH, height=PLAYER_BAR_H)
-        f.pack_propagate(False)
-        c = tk.Canvas(
-            f, bg=TRANSPARENT_KEY,
-            width=HUD_WIDTH, height=PLAYER_BAR_H,
-            highlightthickness=0, bd=0
-        )
-        c.pack(fill=tk.BOTH, expand=True)
-        pill_img = c.create_image(0, 0, anchor="nw")
-
-        c.bind("<ButtonPress-1>", self.start_move)
-        c.bind("<B1-Motion>", self.do_move)
-        c.bind("<ButtonRelease-1>", self.on_bar_release)
-        c.bind("<Button-3>", lambda e, i=idx: self.edit_row_player(i))
-        c.bind("<Enter>", self.on_hover_enter)
-        c.bind("<Leave>", self.on_hover_leave)
-
-        return {"frame": f, "c": c, "pill": pill_img, "packed": False}
 
     def _make_row(self, parent, idx):
         f = tk.Frame(parent, bg=TRANSPARENT_KEY, width=HUD_WIDTH, height=PLAYER_BAR_H)
@@ -3161,6 +3054,7 @@ class OverlayDPSMeter:
         )
         c.pack(fill=tk.BOTH, expand=True)
 
+        pill_img  = c.create_image(0, 0, anchor="nw")
         rank_txt  = c.create_text(12, 15, text="", anchor="center", fill="#cbd5e1", font=("Segoe UI", 9, "bold"))
         icon_img  = c.create_image(28, 15, anchor="center")
         name_txt  = c.create_text(44, 15, text="", anchor="w", fill="#ffffff", font=("Segoe UI", 10, "bold"))
@@ -3182,7 +3076,7 @@ class OverlayDPSMeter:
         c.bind("<Leave>", self.on_hover_leave)
 
         return {
-            "idx": idx, "frame": f, "c": c, "rank": rank_txt, "img": icon_img,
+            "idx": idx, "frame": f, "c": c, "pill": pill_img, "rank": rank_txt, "img": icon_img,
             "name": name_txt, "cp_img": cp_img, "cp": cp_txt,
             "death_img": death_img, "death": death_txt,
             "col1": dmg_txt, "col2": dps_txt, "col3": crit_txt, "col4": share_txt,
@@ -3192,10 +3086,16 @@ class OverlayDPSMeter:
             "_last_rank_color": None,
             "_last_img":       None,
             "_last_name":      None,
+            "_last_name_end":  None,
             "_last_cp_img":    None,
+            "_last_cp_img_x":  None,
             "_last_cp":        None,
+            "_last_cp_x":      None,
+            "_last_after_cp_x": None,
             "_last_death_img": None,
+            "_last_death_img_x": None,
             "_last_death":     None,
+            "_last_death_x":   None,
             "_last_col1":      None,
             "_last_col2":      None,
             "_last_col3":      None,
@@ -3207,14 +3107,12 @@ class OverlayDPSMeter:
         dmg_str, dps_str, share_str, pad_offset=5, death_str="",
         crit_str="", p_class="templar", is_dead=False, ratio=1.0, show_cp_icon=False
     ):
-        """Atualiza a barra visual no fundo (60% opaco) e os textos/ícones na frente (100% nítidos)."""
-        idx = row.get("idx", 0)
+        """Atualiza barra, ícones e métricas na janela única com shadow-cache (zero redraw redundante no DWM)."""
+        c = row["c"]
         if pill is not row["_last_pill"]:
-            if hasattr(self, "bg_rows") and idx < len(self.bg_rows):
-                self.bg_rows[idx]["c"].itemconfig(self.bg_rows[idx]["pill"], image=pill)
+            c.itemconfig(row["pill"], image=pill)
             row["_last_pill"] = pill
 
-        c = row["c"]
         img_val = img_obj if img_obj else ""
         if img_val != row["_last_img"]:
             c.itemconfig(row["img"], image=img_val)
@@ -3235,10 +3133,12 @@ class OverlayDPSMeter:
         if name_changed:
             c.itemconfig(row["name"], text=name_str)
             row["_last_name"] = name_str
+            row["_last_name_end"] = None
 
         if cp_changed:
             c.itemconfig(row["cp"], text=cp_str)
             row["_last_cp"] = cp_str
+            row["_last_after_cp_x"] = None
 
         if death_changed:
             c.itemconfig(row["death"], text=death_str)
@@ -3247,8 +3147,11 @@ class OverlayDPSMeter:
         bar_w = int(HUD_WIDTH * ratio)
         c_theme = p_class if p_class in CLASS_THEMES else "templar"
 
-        bbox_n = c.bbox(row["name"]) if name_str else None
-        name_end = (bbox_n[2] + pad_offset) if bbox_n else (46 + len(name_str) * 7 + pad_offset)
+        name_end = row.get("_last_name_end")
+        if name_end is None:
+            bbox_n = c.bbox(row["name"]) if name_str else None
+            name_end = (bbox_n[2] + pad_offset) if bbox_n else (46 + len(name_str) * 7 + pad_offset)
+            row["_last_name_end"] = name_end
 
         if cp_str:
             if show_cp_icon and hasattr(self, "cp_icons") and self.cp_icons:
@@ -3257,16 +3160,24 @@ class OverlayDPSMeter:
                 if cp_ic != row.get("_last_cp_img"):
                     c.itemconfig(row["cp_img"], image=cp_ic)
                     row["_last_cp_img"] = cp_ic
-                c.coords(row["cp_img"], name_end, 15)
+                if name_end != row.get("_last_cp_img_x"):
+                    c.coords(row["cp_img"], name_end, 15)
+                    row["_last_cp_img_x"] = name_end
                 cp_txt_x = name_end + 14
             else:
                 if row.get("_last_cp_img"):
                     c.itemconfig(row["cp_img"], image="")
                     row["_last_cp_img"] = ""
                 cp_txt_x = name_end
-            c.coords(row["cp"], cp_txt_x, 15)
-            bbox_cp = c.bbox(row["cp"])
-            after_cp_x = (bbox_cp[2] + 6) if bbox_cp else (cp_txt_x + len(cp_str) * 6 + 6)
+            if cp_txt_x != row.get("_last_cp_x"):
+                c.coords(row["cp"], cp_txt_x, 15)
+                row["_last_cp_x"] = cp_txt_x
+                row["_last_after_cp_x"] = None
+            after_cp_x = row.get("_last_after_cp_x")
+            if after_cp_x is None:
+                bbox_cp = c.bbox(row["cp"])
+                after_cp_x = (bbox_cp[2] + 6) if bbox_cp else (cp_txt_x + len(cp_str) * 6 + 6)
+                row["_last_after_cp_x"] = after_cp_x
         else:
             if row.get("_last_cp_img"):
                 c.itemconfig(row["cp_img"], image="")
@@ -3280,10 +3191,15 @@ class OverlayDPSMeter:
                 if sk_ic != row.get("_last_death_img"):
                     c.itemconfig(row["death_img"], image=sk_ic)
                     row["_last_death_img"] = sk_ic
-                c.coords(row["death_img"], after_cp_x, 15)
-                c.coords(row["death"], after_cp_x + 16, 15)
+                if after_cp_x != row.get("_last_death_img_x"):
+                    c.coords(row["death_img"], after_cp_x, 15)
+                    row["_last_death_img_x"] = after_cp_x
+                death_txt_x = after_cp_x + 16
             else:
-                c.coords(row["death"], after_cp_x, 15)
+                death_txt_x = after_cp_x
+            if death_txt_x != row.get("_last_death_x"):
+                c.coords(row["death"], death_txt_x, 15)
+                row["_last_death_x"] = death_txt_x
         else:
             if row.get("_last_death_img"):
                 c.itemconfig(row["death_img"], image="")
@@ -3311,28 +3227,18 @@ class OverlayDPSMeter:
             return
         for i in range(len(self.rows)):
             r = self.rows[i]
-            bg_r = self.bg_rows[i] if hasattr(self, "bg_rows") and i < len(self.bg_rows) else None
             if i < count:
                 if not r["packed"]:
                     r["frame"].pack(fill=tk.X, pady=(0, 3))
                     r["packed"] = True
-                if bg_r and not bg_r["packed"]:
-                    bg_r["frame"].pack(fill=tk.X, pady=(0, 3))
-                    bg_r["packed"] = True
             else:
                 if r["packed"]:
                     r["frame"].pack_forget()
                     r["packed"] = False
-                if bg_r and bg_r["packed"]:
-                    bg_r["frame"].pack_forget()
-                    bg_r["packed"] = False
         self.visible_rows = count
         new_h = (MONSTER_BAR_H + 3) + count * (PLAYER_BAR_H + 3)
         self._cur_win_h = new_h
         self.root.geometry(f"{HUD_WIDTH}x{new_h}")
-        if hasattr(self, "bg_win") and self.bg_win:
-            self.bg_win.geometry(f"{HUD_WIDTH}x{new_h}")
-        self._enforce_z_order()
 
     def _get_fight_duration(self):
         """
@@ -4828,20 +4734,25 @@ class OverlayDPSMeter:
         left_boundary = HUD_WIDTH - 10
         if is_dead:
             # Boss morto: oculta TTD e exibe resumo oficial: "%HP · DPS da PT · Duração final da kill"
-            self.monster_canvas.itemconfig(self.m_ttd_txt, text="")
-            self.monster_canvas.itemconfig(self.m_info_left, text="")
-            self._m_last_ttd = ""
-            self._m_last_left = ""
+            if self._m_last_ttd != "":
+                self.monster_canvas.itemconfig(self.m_ttd_txt, text="")
+                self._m_last_ttd = ""
+            if self._m_last_left != "":
+                self.monster_canvas.itemconfig(self.m_info_left, text="")
+                self._m_last_left = ""
             parts = [f"{pct}%"]
             if pt_dps_str:
                 parts.append(pt_dps_str)
             parts.append(time_str)
             dead_text = " · ".join(parts)
-            self.monster_canvas.coords(self.m_info_txt, HUD_WIDTH - 10, 13)
+            if getattr(self, "_m_last_info_x", None) != (HUD_WIDTH - 10):
+                self.monster_canvas.coords(self.m_info_txt, HUD_WIDTH - 10, 13)
+                self._m_last_info_x = HUD_WIDTH - 10
             if dead_text != self._m_last_info or self._m_last_color != "#ffffff":
                 self.monster_canvas.itemconfig(self.m_info_txt, text=dead_text, fill="#ffffff")
                 self._m_last_info = dead_text
                 self._m_last_color = "#ffffff"
+                self._m_last_info_left_edge = None
             bbox_info = self.monster_canvas.bbox(self.m_info_txt)
             left_boundary = bbox_info[0] if bbox_info else (HUD_WIDTH - 90)
         else:
@@ -4864,7 +4775,9 @@ class OverlayDPSMeter:
                 right_str = time_str
                 r_fill = "#cbd5e1"
 
-            self.monster_canvas.coords(self.m_info_txt, HUD_WIDTH - 10, 13)
+            if getattr(self, "_m_last_info_x", None) != (HUD_WIDTH - 10):
+                self.monster_canvas.coords(self.m_info_txt, HUD_WIDTH - 10, 13)
+                self._m_last_info_x = HUD_WIDTH - 10
             if right_str != self._m_last_info or r_fill != self._m_last_color:
                 self.monster_canvas.itemconfig(self.m_info_txt, text=right_str, fill=r_fill)
                 self._m_last_info = right_str
@@ -4879,7 +4792,9 @@ class OverlayDPSMeter:
                 if ttd_str != self._m_last_ttd:
                     self.monster_canvas.itemconfig(self.m_ttd_txt, text=ttd_str, fill="#f87171")
                     self._m_last_ttd = ttd_str
-                self.monster_canvas.coords(self.m_ttd_txt, r_x - 3, 13)
+                if getattr(self, "_m_last_ttd_x", None) != (r_x - 3):
+                    self.monster_canvas.coords(self.m_ttd_txt, r_x - 3, 13)
+                    self._m_last_ttd_x = r_x - 3
                 bbox_ttd = self.monster_canvas.bbox(self.m_ttd_txt)
                 ttd_x = bbox_ttd[0] if bbox_ttd else (r_x - 52)
             else:
@@ -4896,14 +4811,18 @@ class OverlayDPSMeter:
             if left_str != self._m_last_left:
                 self.monster_canvas.itemconfig(self.m_info_left, text=left_str, fill="#ffffff")
                 self._m_last_left = left_str
-            self.monster_canvas.coords(self.m_info_left, ttd_x - 2, 13)
+            if getattr(self, "_m_last_left_x", None) != (ttd_x - 2):
+                self.monster_canvas.coords(self.m_info_left, ttd_x - 2, 13)
+                self._m_last_left_x = ttd_x - 2
             bbox_l = self.monster_canvas.bbox(self.m_info_left)
             left_boundary = bbox_l[0] if bbox_l else (ttd_x - max(24, len(left_str) * 7))
 
-        if self.is_hovered:
-            self.monster_canvas.itemconfigure(self.m_info_txt, state="hidden")
-            self.monster_canvas.itemconfigure(self.m_ttd_txt, state="hidden")
-            self.monster_canvas.itemconfigure(self.m_info_left, state="hidden")
+        if self.is_hovered != getattr(self, "_m_last_hidden", False):
+            st_val = "hidden" if self.is_hovered else "normal"
+            self.monster_canvas.itemconfigure(self.m_info_txt, state=st_val)
+            self.monster_canvas.itemconfigure(self.m_ttd_txt, state=st_val)
+            self.monster_canvas.itemconfigure(self.m_info_left, state=st_val)
+            self._m_last_hidden = self.is_hovered
 
         t_name = self.active_target_name if self.active_target_name != "Nenhum alvo" else "Aguardando Alvo"
         if self.view_mode == "SKILLS":
@@ -4911,20 +4830,23 @@ class OverlayDPSMeter:
         if self.is_click_through:
             t_name = f"🔒F8 • {t_name}"
 
-        # Evita sobreposição do nome do monstro com as estatísticas à direita
+        # Evita sobreposição do nome do monstro com as estatísticas à direita sem redesenhar quando igual
         avail_w = max(40, left_boundary - 20)
-        self.monster_canvas.itemconfig(self.m_name_txt, text=t_name)
-        bbox_n = self.monster_canvas.bbox(self.m_name_txt)
-        if bbox_n and (bbox_n[2] - bbox_n[0]) > avail_w:
-            while len(t_name) > 4 and (self.monster_canvas.bbox(self.m_name_txt)[2] - self.monster_canvas.bbox(self.m_name_txt)[0]) > avail_w:
-                t_name = t_name[:-2] + "…"
-                self.monster_canvas.itemconfig(self.m_name_txt, text=t_name)
-        self._m_last_name = t_name
+        if t_name != getattr(self, "_m_last_raw_name", None) or avail_w != getattr(self, "_m_last_avail_w", None):
+            self._m_last_raw_name = t_name
+            self._m_last_avail_w = avail_w
+            disp_name = t_name
+            self.monster_canvas.itemconfig(self.m_name_txt, text=disp_name)
+            bbox_n = self.monster_canvas.bbox(self.m_name_txt)
+            if bbox_n and (bbox_n[2] - bbox_n[0]) > avail_w:
+                while len(disp_name) > 4 and (self.monster_canvas.bbox(self.m_name_txt)[2] - self.monster_canvas.bbox(self.m_name_txt)[0]) > avail_w:
+                    disp_name = disp_name[:-2] + "…"
+                    self.monster_canvas.itemconfig(self.m_name_txt, text=disp_name)
+            self._m_last_name = disp_name
 
         m_pill = self.pill_renderer.get_monster_pill(ratio if not is_dead else 0.0)
         if m_pill is not self._m_last_pill:
-            if hasattr(self, "bg_monster_canvas") and self.bg_monster_canvas:
-                self.bg_monster_canvas.itemconfig(self.m_bg_img, image=m_pill)
+            self.monster_canvas.itemconfig(self.m_bg_img, image=m_pill)
             self._m_last_pill = m_pill
 
     def render_hud(self, dur):
