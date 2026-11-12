@@ -774,7 +774,7 @@ class PacketDispatcher:
             st["ooo"].clear()
             st["ooo_bytes"] = 0
             st["buf"].clear()
-            st["synced"] = False
+            st["synced"] = True
             if not data_chunk:
                 return
 
@@ -825,6 +825,62 @@ class PacketDispatcher:
     def process_buffer(self):
         self.is_synced = self._process_buf(self.buffer, self.is_synced)
 
+    def _valid_pkt_chain(self, buf, pos, buf_len):
+        """
+        Verifica se `pos` inicia uma cadeia contígua válida de pacotes Aion 2,
+        aceitando opcodes não-monitorados contíguos sem perder o alinhamento no byte 0.
+        Retorna: True (sincronia confirmada), None (aguardar mais bytes), False (desalinhado).
+        """
+        cur = pos
+        count = 0
+        has_known = False
+        while cur < buf_len and count < 4:
+            res = get_packet_length(buf, cur, buf_len)
+            if res is None:
+                return None if count > 0 else False
+            pkt_len, vlen = res
+            if pkt_len < vlen + 2 or pkt_len > 262144:
+                return False
+            if cur + pkt_len > buf_len:
+                if cur + vlen + 2 <= buf_len:
+                    nxt_op = buf[cur + vlen] | (buf[cur + vlen + 1] << 8)
+                    if nxt_op == 0:
+                        return False
+                    if (nxt_op in HANDLED_OPCODES or nxt_op == 65535) and (has_known or count >= 2):
+                        return True
+                if count >= 3:
+                    return True
+                if count >= 2 and has_known:
+                    return True
+                return None
+            op_off = cur + vlen
+            if op_off + 2 > cur + pkt_len:
+                return False
+            opcode = buf[op_off] | (buf[op_off + 1] << 8)
+            if opcode == 0:
+                return False
+            if opcode in HANDLED_OPCODES or opcode == 65535:
+                has_known = True
+            cur += pkt_len
+            count += 1
+
+        if count >= 4:
+            return True
+        if count >= 3:
+            if has_known or cur == buf_len:
+                return True
+            nxt4 = get_packet_length(buf, cur, buf_len)
+            if nxt4 is None:
+                return None
+            if nxt4[0] >= nxt4[1] + 2 and nxt4[0] <= 262144:
+                return True
+            return False
+        if count == 2 and has_known and cur == buf_len:
+            return True
+        if count in (1, 2):
+            return None
+        return False
+
     def _process_buf(self, buf, synced):
         pos = 0
         buf_len = len(buf)
@@ -840,7 +896,7 @@ class PacketDispatcher:
                     pos += 1
                     continue
                 pkt_len, vlen = res
-                if pkt_len <= 0:
+                if pkt_len < vlen + 2 or pkt_len > 262144:
                     pos += 1
                     continue
                 if pos + pkt_len > buf_len:
@@ -852,6 +908,9 @@ class PacketDispatcher:
                 body_start = pos + vlen + 2
                 body_end   = pos + pkt_len
                 opcode = buf[pos + vlen] | (buf[pos + vlen + 1] << 8)
+                if opcode == 0:
+                    pos += 1
+                    continue
 
                 if opcode == 65535:
                     bundle_ok = False
@@ -863,8 +922,7 @@ class PacketDispatcher:
                                     memoryview(buf)[body_start + 4 : body_end],
                                     uncompressed_size=decomp_size
                                 )
-                                self.is_synced = False
-                                if self.parse_payload_packets(decomp):
+                                if self.parse_payload_packets(decomp, is_synced=True):
                                     synced = True
                                     bundle_ok = True
                             except Exception:
@@ -877,40 +935,23 @@ class PacketDispatcher:
                     pos += 1
                     continue
 
-                if first_incomplete is not None:
-                    pos += 1
-                    continue
-
-                if pos + pkt_len + 3 <= buf_len:
-                    nxt = get_packet_length(buf, pos + pkt_len, buf_len)
-                    if nxt is not None and nxt[0] > 0:
-                        nxt_len, nxt_vlen = nxt
-                        nxt_op_off = pos + pkt_len + nxt_vlen
-                        nxt_valid = False
-                        if pos + pkt_len + nxt_len <= buf_len and nxt_op_off + 2 <= buf_len:
-                            nxt_opcode = buf[nxt_op_off] | (buf[nxt_op_off + 1] << 8)
-                            nxt_valid = (nxt_opcode in HANDLED_OPCODES or nxt_opcode == 65535)
-                        if opcode in HANDLED_OPCODES or nxt_valid:
-                            synced = True
-                            if opcode in HANDLED_OPCODES:
-                                self.is_synced = True
-                                self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False)
-                            pos += pkt_len
-                            last_valid_end = pos
-                            first_incomplete = None
-                            continue
-                    pos += 1
-                    continue
-
                 if pos == 0 and last_valid_end == 0 and (pos + pkt_len) == buf_len and opcode in HANDLED_OPCODES:
-                    self.is_synced = False
-                    self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False)
+                    self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False, is_synced=False)
                     pos += pkt_len
                     last_valid_end = pos
                     first_incomplete = None
                     continue
 
-                if first_incomplete is None:
+                chain_state = self._valid_pkt_chain(buf, pos, buf_len)
+                if chain_state is True:
+                    synced = True
+                    if opcode in HANDLED_OPCODES:
+                        self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False, is_synced=True)
+                    pos += pkt_len
+                    last_valid_end = pos
+                    first_incomplete = None
+                    continue
+                if chain_state is None and first_incomplete is None:
                     first_incomplete = pos
                 pos += 1
                 continue
@@ -919,7 +960,7 @@ class PacketDispatcher:
             if res is None:
                 break
             pkt_len, vlen = res
-            if pkt_len <= 0:
+            if pkt_len < vlen + 2 or pkt_len > 262144:
                 synced = False
                 first_incomplete = None
                 pos += 1
@@ -946,8 +987,7 @@ class PacketDispatcher:
                                 memoryview(buf)[body_start + 4 : body_end],
                                 uncompressed_size=decomp_size
                             )
-                            self.is_synced = synced
-                            if self.parse_payload_packets(decomp):
+                            if self.parse_payload_packets(decomp, is_synced=synced):
                                 synced = True
                                 bundle_ok = True
                         except Exception:
@@ -961,8 +1001,7 @@ class PacketDispatcher:
                 last_valid_end = pos
                 continue
             elif opcode in HANDLED_OPCODES:
-                self.is_synced = synced
-                self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False)
+                self.dispatch_packet(opcode, buf, body_start, body_end, from_lz4=False, is_synced=synced)
 
             pos += pkt_len
             last_valid_end = pos
@@ -978,11 +1017,28 @@ class PacketDispatcher:
             )
             if keep_from > 0:
                 del buf[:keep_from]
-            if len(buf) > 65536:
-                del buf[:len(buf) - 65536]
+            if len(buf) > 32768:
+                del buf[:len(buf) - 32768]
         return synced
 
-    def parse_payload_packets(self, payload):
+    def _validate_payload_framing(self, payload):
+        pos = 0
+        p_len = len(payload)
+        if p_len == 0:
+            return False
+        while pos < p_len:
+            res = get_packet_length(payload, pos, p_len)
+            if res is None:
+                return False
+            pkt_len, vlen = res
+            if pkt_len < vlen + 2 or pos + pkt_len > p_len:
+                return False
+            pos += pkt_len
+        return pos == p_len
+
+    def parse_payload_packets(self, payload, is_synced=True):
+        if not self._validate_payload_framing(payload):
+            return False
         pos = 0
         p_len = len(payload)
         while pos < p_len:
@@ -990,19 +1046,18 @@ class PacketDispatcher:
             if res is None:
                 return False
             pkt_len, vlen = res
-            if pkt_len <= 0 or pos + pkt_len > p_len:
-                return False
             body_start = pos + vlen + 2
             body_end   = pos + pkt_len
             opcode = payload[pos + vlen] | (payload[pos + vlen + 1] << 8)
             if opcode in HANDLED_OPCODES:
-                self.dispatch_packet(opcode, payload, body_start, body_end, from_lz4=True)
+                self.dispatch_packet(opcode, payload, body_start, body_end, from_lz4=True, is_synced=is_synced)
             pos += pkt_len
         return pos == p_len
 
-    def dispatch_packet(self, opcode, buf, start, end, from_lz4=False):
+    def dispatch_packet(self, opcode, buf, start, end, from_lz4=False, is_synced=None):
         if opcode not in HANDLED_OPCODES:
             return
+        stream_synced = self.is_synced if is_synced is None else is_synced
         try:
             reader = ByteReader(buf, start, end)
 
@@ -1380,12 +1435,12 @@ class PacketDispatcher:
 
             # 5.2. PartySetTargetByBoss_NT (37408) & PartyDungeonRewardMiddleBossKill_NT (22318)
             elif opcode == 37408:
-                if (from_lz4 or self.is_synced) and (end - start) <= 6:
+                if (from_lz4 or stream_synced) and (end - start) <= 6:
                     target_key = reader.vi32()
                     if target_key > 0:
                         self.event_queue.put({"type": "boss_target", "target_key": target_key})
             elif opcode == 22318:
-                if (from_lz4 or self.is_synced) and (end - start) == 4:
+                if (from_lz4 or stream_synced) and (end - start) == 4:
                     npc_id = reader.i32()
                     if npc_id > 0:
                         self.event_queue.put({"type": "dungeon_boss_killed", "npc_id": npc_id})
@@ -1695,7 +1750,7 @@ class PacketDispatcher:
 
             # 12.5. ForceRemoveMember_NT (38434): Membro específico removido
             elif opcode == 38434:
-                if (from_lz4 or self.is_synced) and end - start == 17:
+                if (from_lz4 or stream_synced) and end - start == 17:
                     member_dbid = reader.i64()
                     p_key       = reader.i64()
                     reason      = reader.u8()
@@ -1774,7 +1829,7 @@ class PacketDispatcher:
 
             # 13. Saída / Desmanche / Kick do Grupo (Validação Estrita l.exact + Sincronia para evitar falsos positivos em combate)
             elif opcode in (37395, 37663, 37407, 37401, 38426, 38446):
-                if not (from_lz4 or self.is_synced):
+                if not (from_lz4 or stream_synced):
                     return
                 pkt_size = end - start
                 valid_leave = False
@@ -2487,7 +2542,6 @@ class OverlayDPSMeter:
         self.root.configure(bg=TRANSPARENT_KEY)
         try:
             self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
-            self.root.attributes("-alpha", 1.0)
         except Exception:
             pass
 
@@ -2674,6 +2728,8 @@ class OverlayDPSMeter:
                 else:
                     ex_style &= ~WS_EX_TRANSPARENT
                 _set_win_long(hwnd, GWL_EXSTYLE, ex_style)
+                # SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                _win32_user.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0037)
                 if is_bg:
                     alpha_b = max(1, min(255, int(255 * getattr(self, "bar_opacity", 0.60))))
                     _win32_user.SetLayeredWindowAttributes(hwnd, cr_key, alpha_b, 3)  # LWA_COLORKEY | LWA_ALPHA
@@ -2704,6 +2760,7 @@ class OverlayDPSMeter:
                     else:
                         ex_style &= ~WS_EX_TRANSPARENT
                     _set_win_long(hwnd, GWL_EXSTYLE, ex_style)
+                    _win32_user.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0037)
         except Exception:
             pass
 
@@ -3726,7 +3783,8 @@ class OverlayDPSMeter:
                     return matched_name, is_loc
             else:
                 # 5c. sk_class é None (ataque básico / auto-attack / Godstone / DoT)
-                # Associa a um membro sem key (provisoriamente se houver >1 sem key, garantindo que NENHUM hit no Boss seja perdido!)
+                # Só associa provisoriamente quando local_player_key já está confirmada (evita roubar hits locais para colega)
+                # ou quando há apenas 1 membro sem key no grupo todo.
                 unkeyed_non_local = [
                     (m_name, m_data) for m_name, m_data in self.party_members.items()
                     if not m_data.get("key")
@@ -3736,14 +3794,19 @@ class OverlayDPSMeter:
                     (m_name, m_data) for m_name, m_data in self.party_members.items()
                     if not m_data.get("key")
                 ]
-                candidates = unkeyed_non_local if (self.local_player_key or unkeyed_non_local) else unkeyed_all
-                if not candidates:
-                    # Se todos tinham keys antigas de fora da instância, verifica quem ainda não pontuou nesta luta:
-                    candidates = [
-                        (m_name, m_data) for m_name, m_data in self.party_members.items()
-                        if m_name not in self.players_combat
-                        and (not self.player_identified or not self.local_player_name or m_name.lower() != self.local_player_name.lower() or "LOCAL" not in self.players_combat)
-                    ]
+                if self.local_player_key:
+                    candidates = unkeyed_non_local
+                    if not candidates and not unkeyed_all:
+                        # Se todos tinham keys antigas de fora da instância, verifica quem ainda não pontuou nesta luta:
+                        candidates = [
+                            (m_name, m_data) for m_name, m_data in self.party_members.items()
+                            if m_name not in self.players_combat
+                            and (not self.player_identified or not self.local_player_name or m_name.lower() != self.local_player_name.lower())
+                        ]
+                elif len(unkeyed_all) == 1:
+                    candidates = unkeyed_all
+                else:
+                    candidates = []
                 if candidates:
                     matched_name, m_data = candidates[0]
                     m_data["key"] = caster_key
