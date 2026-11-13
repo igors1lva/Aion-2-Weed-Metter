@@ -22,7 +22,7 @@ import urllib.request
 from functools import lru_cache
 from collections import OrderedDict
 import lz4.block
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 if sys.platform == "win32" and sys.stdout is not None:
     try:
@@ -36,27 +36,36 @@ if sys.platform == "win32":
     class _Win32Point(ctypes.Structure):
         _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
-    _win32_user = ctypes.WinDLL("user32")
-    _win32_gdi  = ctypes.WinDLL("gdi32")
-    _win32_dwm  = ctypes.WinDLL("dwmapi")
+    _win32_kernel = ctypes.WinDLL("kernel32")
+    _win32_user   = ctypes.WinDLL("user32")
+    _win32_gdi    = ctypes.WinDLL("gdi32")
+    _win32_dwm    = ctypes.WinDLL("dwmapi")
 
-    _win32_gdi.CreateRoundRectRgn.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    _win32_gdi.CreateRoundRectRgn.restype  = wintypes.HRGN
-    _win32_gdi.CombineRgn.argtypes         = [wintypes.HRGN, wintypes.HRGN, wintypes.HRGN, ctypes.c_int]
-    _win32_gdi.CombineRgn.restype          = ctypes.c_int
-    _win32_gdi.DeleteObject.argtypes       = [wintypes.HGDIOBJ]
-    _win32_gdi.DeleteObject.restype        = wintypes.BOOL
+    _win32_kernel.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    _win32_kernel.GetModuleHandleW.restype  = wintypes.HMODULE
 
     _win32_user.GetParent.argtypes                   = [wintypes.HWND]
     _win32_user.GetParent.restype                    = wintypes.HWND
-    _win32_user.SetWindowRgn.argtypes                = [wintypes.HWND, wintypes.HRGN, wintypes.BOOL]
-    _win32_user.SetWindowRgn.restype                 = ctypes.c_int
     _win32_user.SetWindowPos.argtypes                = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
     _win32_user.SetWindowPos.restype                 = wintypes.BOOL
     _win32_user.SetLayeredWindowAttributes.argtypes  = [wintypes.HWND, wintypes.COLORREF, wintypes.BYTE, wintypes.DWORD]
     _win32_user.SetLayeredWindowAttributes.restype   = wintypes.BOOL
     _win32_user.InvalidateRect.argtypes              = [wintypes.HWND, ctypes.c_void_p, wintypes.BOOL]
     _win32_user.InvalidateRect.restype               = wintypes.BOOL
+    _win32_user.ValidateRect.argtypes                = [wintypes.HWND, ctypes.c_void_p]
+    _win32_user.ValidateRect.restype                 = wintypes.BOOL
+    _win32_user.ShowWindow.argtypes                  = [wintypes.HWND, ctypes.c_int]
+    _win32_user.ShowWindow.restype                   = wintypes.BOOL
+    _win32_user.DestroyWindow.argtypes               = [wintypes.HWND]
+    _win32_user.DestroyWindow.restype                = wintypes.BOOL
+    _win32_user.SetCapture.argtypes                  = [wintypes.HWND]
+    _win32_user.SetCapture.restype                   = wintypes.HWND
+    _win32_user.ReleaseCapture.argtypes              = []
+    _win32_user.ReleaseCapture.restype               = wintypes.BOOL
+    _win32_user.LoadCursorW.argtypes                 = [wintypes.HINSTANCE, ctypes.c_void_p]
+    _win32_user.LoadCursorW.restype                  = wintypes.HANDLE
+    _win32_user.DefWindowProcW.argtypes              = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t]
+    _win32_user.DefWindowProcW.restype               = ctypes.c_ssize_t
 
     _get_win_long = getattr(_win32_user, "GetWindowLongPtrW", _win32_user.GetWindowLongW)
     _set_win_long = getattr(_win32_user, "SetWindowLongPtrW", _win32_user.SetWindowLongW)
@@ -387,27 +396,27 @@ def get_class_by_skill_id(skill_id):
 class IconManager:
     def __init__(self):
         self.cache = {}
+        self.pil_cache = {}
         self.downloading = set()
         self.failed = set()
 
-    def get_skill_icon(self, icon_rel_path):
+    def get_skill_icon_pil(self, icon_rel_path):
+        """Retorna imagem PIL RGBA 20x20 limpa (sem colorkey halo) para composição nativa DirectComposition."""
         if not icon_rel_path or icon_rel_path in self.failed:
             return None
-        if icon_rel_path in self.cache:
-            return self.cache[icon_rel_path]
+        if icon_rel_path in self.pil_cache:
+            return self.pil_cache[icon_rel_path]
 
         base_name = icon_rel_path.split("/")[-1].split(".")[0]
         local_png = os.path.join(ICONS_DIR, f"{base_name}.png")
         local_webp = os.path.join(ICONS_DIR, f"{base_name}.webp")
 
-        # ImageTk.PhotoImage SEMPRE instanciado exclusivamente na Main Thread (Thread-Safe!)
         if os.path.exists(local_png):
             try:
                 with Image.open(local_png) as img:
-                    clean_img = _composite_for_colorkey(img.convert("RGBA"), _get_theme_bg_rgb("skill"), alpha_cutoff=75)
-                    photo = ImageTk.PhotoImage(clean_img)
-                self.cache[icon_rel_path] = photo
-                return photo
+                    clean_img = img.convert("RGBA").resize((20, 20), Image.Resampling.LANCZOS)
+                self.pil_cache[icon_rel_path] = clean_img
+                return clean_img
             except Exception:
                 pass
         elif os.path.exists(local_webp):
@@ -415,10 +424,8 @@ class IconManager:
                 with Image.open(local_webp) as raw_im:
                     img = raw_im.convert("RGBA").resize((20, 20), Image.Resampling.LANCZOS)
                     img.save(local_png)
-                    clean_img = _composite_for_colorkey(img, _get_theme_bg_rgb("skill"), alpha_cutoff=75)
-                    photo = ImageTk.PhotoImage(clean_img)
-                self.cache[icon_rel_path] = photo
-                return photo
+                self.pil_cache[icon_rel_path] = img
+                return img
             except Exception:
                 pass
 
@@ -427,6 +434,23 @@ class IconManager:
             threading.Thread(target=self._download, args=(icon_rel_path, local_webp, local_png), daemon=True).start()
 
         return None
+
+    def get_skill_icon(self, icon_rel_path):
+        if not icon_rel_path or icon_rel_path in self.failed:
+            return None
+        if icon_rel_path in self.cache:
+            return self.cache[icon_rel_path]
+
+        rgba = self.get_skill_icon_pil(icon_rel_path)
+        if rgba is None:
+            return None
+        try:
+            clean_img = _composite_for_colorkey(rgba, _get_theme_bg_rgb("skill"), alpha_cutoff=75)
+            photo = ImageTk.PhotoImage(clean_img)
+            self.cache[icon_rel_path] = photo
+            return photo
+        except Exception:
+            return None
 
     def _download(self, icon_rel_path, local_webp, local_png):
         # Thread secundária apenas baixa e salva o PNG no disco (sem tocar no Tcl/Tk!)
@@ -2339,8 +2363,11 @@ def _make_weed_skull_pil():
 
 class PillRenderer:
     def __init__(self):
-        self.player_cache  = OrderedDict()
-        self.monster_cache = OrderedDict()
+        self.player_cache      = OrderedDict()
+        self.monster_cache     = OrderedDict()
+        self.player_pil_cache  = OrderedDict()
+        self.monster_pil_cache = OrderedDict()
+
         self.p_mask = Image.new("L", (HUD_WIDTH, PLAYER_BAR_H), 0)
         ImageDraw.Draw(self.p_mask).rounded_rectangle(
             [0, 0, HUD_WIDTH - 1, PLAYER_BAR_H - 1], radius=6, fill=255
@@ -2350,7 +2377,23 @@ class PillRenderer:
             [0, 0, HUD_WIDTH - 1, MONSTER_BAR_H - 1], radius=6, fill=255
         )
 
-        # Gradiente vermelho / coral da barra do monstro (Idêntico ao da foto: Isolation Specialist Rahu - Hard)
+        # Máscaras suavizadas (2x supersampling + 60% opacidade) para DirectComposition
+        p_hi = Image.new("L", (HUD_WIDTH * 2, PLAYER_BAR_H * 2), 0)
+        ImageDraw.Draw(p_hi).rounded_rectangle(
+            [0, 0, HUD_WIDTH * 2 - 1, PLAYER_BAR_H * 2 - 1], radius=12, fill=255
+        )
+        self.p_mask_60 = p_hi.resize((HUD_WIDTH, PLAYER_BAR_H), Image.Resampling.LANCZOS).point(
+            lambda a: (a * 153) // 255
+        )
+        m_hi = Image.new("L", (HUD_WIDTH * 2, MONSTER_BAR_H * 2), 0)
+        ImageDraw.Draw(m_hi).rounded_rectangle(
+            [0, 0, HUD_WIDTH * 2 - 1, MONSTER_BAR_H * 2 - 1], radius=12, fill=255
+        )
+        self.m_mask_60 = m_hi.resize((HUD_WIDTH, MONSTER_BAR_H), Image.Resampling.LANCZOS).point(
+            lambda a: (a * 153) // 255
+        )
+
+        # Gradiente vermelho / coral da barra do monstro
         m_grad = Image.new("RGBA", (2, 2))
         m_grad.putpixel((0, 0), (195, 88, 98, 255))
         m_grad.putpixel((1, 0), (220, 110, 120, 255))
@@ -2363,20 +2406,9 @@ class PillRenderer:
         if raw_w >= HUD_WIDTH: return HUD_WIDTH
         return (raw_w // 2) * 2
 
-    def get_monster_pill(self, ratio, solid_bg=False):
-        # Exibe a pílula vermelha sob o nome do boss proporcional ao HP.
-        # Quando solid_bg=True (Modo Performance sem LWA_COLORKEY), preenche cápsula escura arredondada no fundo todo.
-        calc_w = int(HUD_WIDTH * ratio)
-        min_w = 120
-        bar_w = max(min_w, min(HUD_WIDTH - 75, calc_w))
-        bar_w = self._quantize_w(bar_w)
-        cache_key = (bar_w, bool(solid_bg))
-        if cache_key in self.monster_cache:
-            self.monster_cache.move_to_end(cache_key)
-            return self.monster_cache[cache_key]
-
-        if solid_bg:
-            out = Image.new("RGBA", (HUD_WIDTH, MONSTER_BAR_H), (22, 18, 26, 255))
+    def _build_monster_pill_pil(self, bar_w, dark_capsule=False, alpha_bg=False):
+        if dark_capsule or alpha_bg:
+            out = Image.new("RGBA", (HUD_WIDTH, MONSTER_BAR_H), (20, 16, 24, 255))
             d_bg = ImageDraw.Draw(out)
             d_bg.rounded_rectangle(
                 [0, 0, HUD_WIDTH - 1, MONSTER_BAR_H - 1],
@@ -2398,23 +2430,38 @@ class PillRenderer:
                 radius=6, outline=(225, 115, 125, 255), width=1
             )
             out.paste(pill_img, (0, 0), pill_mask)
+        if alpha_bg:
+            out.putalpha(self.m_mask_60)
+        return out
 
+    def get_monster_pill_pil(self, ratio):
+        calc_w = int(HUD_WIDTH * ratio)
+        bar_w = self._quantize_w(max(120, min(HUD_WIDTH - 75, calc_w)))
+        if bar_w in self.monster_pil_cache:
+            self.monster_pil_cache.move_to_end(bar_w)
+            return self.monster_pil_cache[bar_w]
+        out = self._build_monster_pill_pil(bar_w, dark_capsule=True, alpha_bg=True)
+        self.monster_pil_cache[bar_w] = out
+        if len(self.monster_pil_cache) > 128:
+            self.monster_pil_cache.popitem(last=False)
+        return out
+
+    def get_monster_pill(self, ratio, solid_bg=False):
+        calc_w = int(HUD_WIDTH * ratio)
+        bar_w = self._quantize_w(max(120, min(HUD_WIDTH - 75, calc_w)))
+        cache_key = (bar_w, bool(solid_bg))
+        if cache_key in self.monster_cache:
+            self.monster_cache.move_to_end(cache_key)
+            return self.monster_cache[cache_key]
+        out = self._build_monster_pill_pil(bar_w, dark_capsule=bool(solid_bg), alpha_bg=False)
         photo = ImageTk.PhotoImage(out)
         self.monster_cache[cache_key] = photo
         if len(self.monster_cache) > 128:
             self.monster_cache.popitem(last=False)
         return photo
 
-    def get_player_pill(self, class_name, ratio, is_local=False, is_dead=False):
-        c_name = class_name if class_name in CLASS_THEMES else "templar"
+    def _build_player_pill_pil(self, c_name, bar_w, is_local=False, is_dead=False, alpha_bg=False):
         theme = CLASS_THEMES[c_name]
-        bar_w = self._quantize_w(int(HUD_WIDTH * ratio))
-        key = (c_name, bar_w, is_local, is_dead)
-        if key in self.player_cache:
-            self.player_cache.move_to_end(key)
-            return self.player_cache[key]
-
-        # 1. Trilha de fundo (toda a barra) com a cor da classe escura sólida (alfa 255)
         bar_img = Image.new("RGBA", (HUD_WIDTH, PLAYER_BAR_H))
         b_draw = ImageDraw.Draw(bar_img)
         t_top = theme["track_top"]
@@ -2426,24 +2473,19 @@ class PillRenderer:
             b = int(t_top[2] * (1 - f) + t_bot[2] * f)
             b_draw.line([(0, y), (HUD_WIDTH - 1, y)], fill=(r, g, b, 255))
 
-        # 2. Barra de progresso ativa do dano com a cor da classe viva (ou esmaecida/listrada se morto)
         if bar_w > 0:
             f_top = theme["fill_top"]
             f_bot = theme["fill_bot"]
             if is_dead:
-                # Esmaece a cor da classe (~48% intensidade + cinza escuro) igual ao Questlog quando o jogador morre
                 f_top = (int(f_top[0] * 0.48 + 16), int(f_top[1] * 0.48 + 17), int(f_top[2] * 0.48 + 20))
                 f_bot = (int(f_bot[0] * 0.48 + 12), int(f_bot[1] * 0.48 + 13), int(f_bot[2] * 0.48 + 16))
-
             for y in range(PLAYER_BAR_H):
                 f = y / max(1, PLAYER_BAR_H - 1)
                 r = int(f_top[0] * (1 - f) + f_bot[0] * f)
                 g = int(f_top[1] * (1 - f) + f_bot[1] * f)
                 b = int(f_top[2] * (1 - f) + f_bot[2] * f)
                 b_draw.line([(0, y), (bar_w - 1, y)], fill=(r, g, b, 255))
-
             if is_dead and bar_w > 6:
-                # Desenha hachuras diagonais sutis (//) na barra do jogador morto (idêntico ao Questlog)
                 stripe_col = (
                     min(255, f_top[0] + 18),
                     min(255, f_top[1] + 18),
@@ -2451,10 +2493,8 @@ class PillRenderer:
                     255
                 )
                 for sx in range(-PLAYER_BAR_H, bar_w, 10):
-                    x0 = sx
-                    y0 = PLAYER_BAR_H - 2
-                    x1 = sx + PLAYER_BAR_H - 2
-                    y1 = 1
+                    x0, y0 = sx, PLAYER_BAR_H - 2
+                    x1, y1 = sx + PLAYER_BAR_H - 2, 1
                     if x1 > bar_w - 2:
                         diff = x1 - (bar_w - 2)
                         x1 -= diff
@@ -2465,19 +2505,15 @@ class PillRenderer:
                         y0 -= diff
                     if x0 < x1 and y0 > y1:
                         b_draw.line([(x0, y0), (x1, y1)], fill=stripe_col, width=2)
-
-            # Linha divisória branca no final do dano
             if 4 < bar_w < HUD_WIDTH - 2:
                 div_alpha = (180, 185, 195, 210) if is_dead else (255, 255, 255, 230)
                 b_draw.line([(bar_w - 1, 1), (bar_w - 1, PLAYER_BAR_H - 2)], fill=div_alpha, width=2)
 
-        # 3. Faixa de destaque lateral esquerda (4px) com a cor vibrante da classe
         acc = theme["accent"]
         if is_dead:
             acc = (int(acc[0] * 0.55 + 20), int(acc[1] * 0.55 + 20), int(acc[2] * 0.55 + 24))
         b_draw.rectangle([0, 0, 3, PLAYER_BAR_H - 1], fill=acc + (255,))
 
-        # 4. Borda externa (dourada para local, ou tom da classe para outros)
         outline_col = (248, 151, 10, 255) if is_local else (theme["border"] + (255,))
         outline_w   = 2 if is_local else 1
         b_draw.rounded_rectangle(
@@ -2487,14 +2523,538 @@ class PillRenderer:
             width=outline_w
         )
 
-        # 5. Máscara de cantos arredondados sobre o fundo transparente
+        if alpha_bg:
+            bar_img.putalpha(self.p_mask_60)
+            return bar_img
         out = Image.new("RGBA", (HUD_WIDTH, PLAYER_BAR_H), TRANSPARENT_RGB)
         out.paste(bar_img, (0, 0), self.p_mask)
+        return out
+
+    def get_player_pill_pil(self, class_name, ratio, is_local=False, is_dead=False):
+        c_name = class_name if class_name in CLASS_THEMES else "templar"
+        bar_w = self._quantize_w(int(HUD_WIDTH * ratio))
+        key = (c_name, bar_w, bool(is_local), bool(is_dead))
+        if key in self.player_pil_cache:
+            self.player_pil_cache.move_to_end(key)
+            return self.player_pil_cache[key]
+        out = self._build_player_pill_pil(c_name, bar_w, is_local=is_local, is_dead=is_dead, alpha_bg=True)
+        self.player_pil_cache[key] = out
+        if len(self.player_pil_cache) > 240:
+            self.player_pil_cache.popitem(last=False)
+        return out
+
+    def get_player_pill(self, class_name, ratio, is_local=False, is_dead=False):
+        c_name = class_name if class_name in CLASS_THEMES else "templar"
+        bar_w = self._quantize_w(int(HUD_WIDTH * ratio))
+        key = (c_name, bar_w, bool(is_local), bool(is_dead))
+        if key in self.player_cache:
+            self.player_cache.move_to_end(key)
+            return self.player_cache[key]
+        out = self._build_player_pill_pil(c_name, bar_w, is_local=is_local, is_dead=is_dead, alpha_bg=False)
         photo = ImageTk.PhotoImage(out)
         self.player_cache[key] = photo
         if len(self.player_cache) > 240:
             self.player_cache.popitem(last=False)
         return photo
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# COMPOSITOR NATIVO DIRECTCOMPOSITION + WS_EX_NOREDIRECTIONBITMAP (ZERO GDI!)
+# ───────────────────────────────────────────────────────────────────────────
+def _hex_to_rgba(hex_str, alpha=255):
+    s = (hex_str or "#ffffff").lstrip("#")
+    if len(s) != 6:
+        return (255, 255, 255, alpha)
+    return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16), alpha)
+
+
+class _DCompFontSet:
+    """Carrega fontes TrueType do Windows uma única vez com fallback seguro e cache de largura."""
+    def __init__(self):
+        fonts_dir = r"C:\Windows\Fonts"
+        def _load(fname, px):
+            p = os.path.join(fonts_dir, fname)
+            if os.path.exists(p):
+                try:
+                    return ImageFont.truetype(p, px)
+                except Exception:
+                    pass
+            return ImageFont.load_default()
+
+        self.fonts = {
+            "8b":  _load("segoeuib.ttf", 11),
+            "9":   _load("segoeui.ttf",  12),
+            "9b":  _load("segoeuib.ttf", 12),
+            "10b": _load("segoeuib.ttf", 13),
+        }
+        self.em = _load("seguiemj.ttf", 12)
+        self.sy = _load("seguisym.ttf", 12)
+        self._measure_probe = ImageDraw.Draw(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
+        self._w_cache = OrderedDict()
+
+    def split_runs(self, text):
+        if not text:
+            return []
+        runs = []
+        buf = []
+        cur_kind = None
+        for ch in text:
+            o = ord(ch)
+            if ch in ("⏸", "▶", "⚡", "✕"):
+                kind = "sy"
+            elif o >= 0x2600 or o in (0x231B, 0x23F0, 0x23F3):
+                kind = "em"
+            else:
+                kind = "ui"
+            if kind != cur_kind and buf:
+                runs.append((cur_kind, "".join(buf)))
+                buf = [ch]
+            else:
+                buf.append(ch)
+            cur_kind = kind
+        if buf:
+            runs.append((cur_kind, "".join(buf)))
+        return runs
+
+    def measure_w(self, font_key, text):
+        if not text:
+            return 0
+        ck = (font_key, text)
+        if ck in self._w_cache:
+            self._w_cache.move_to_end(ck)
+            return self._w_cache[ck]
+        f_ui = self.fonts.get(font_key, self.fonts["9b"])
+        total = 0.0
+        for kind, seg in self.split_runs(text):
+            fnt = f_ui if kind == "ui" else (self.sy if kind == "sy" else self.em)
+            try:
+                total += float(self._measure_probe.textlength(seg, font=fnt))
+            except Exception:
+                bb = self._measure_probe.textbbox((0, 0), seg, font=fnt)
+                total += float(max(0, bb[2] - bb[0]))
+        w = int(round(total))
+        self._w_cache[ck] = w
+        if len(self._w_cache) > 1024:
+            self._w_cache.popitem(last=False)
+        return w
+
+    def draw_text(self, draw, x, y, text, font_key="9b", fill=(255, 255, 255, 255), anchor="lm"):
+        if not text:
+            return
+        runs = self.split_runs(text)
+        f_ui = self.fonts.get(font_key, self.fonts["9b"])
+        if len(runs) == 1 and runs[0][0] == "ui":
+            draw.text((x, y), text, font=f_ui, fill=fill, anchor=anchor)
+            return
+        total_w = self.measure_w(font_key, text)
+        if anchor == "rm":
+            cx = float(x - total_w)
+        elif anchor == "mm":
+            cx = float(x - total_w * 0.5)
+        else:
+            cx = float(x)
+        for kind, seg in runs:
+            if kind == "ui":
+                draw.text((cx, y), seg, font=f_ui, fill=fill, anchor="lm")
+                seg_w = self.measure_w(font_key, seg)
+            elif kind == "sy":
+                draw.text((cx, y), seg, font=self.sy, fill=fill, anchor="lm")
+                seg_w = self.measure_w(font_key, seg)
+            else:
+                try:
+                    draw.text((cx, y), seg, font=self.em, fill=fill, anchor="lm", embedded_color=True)
+                except TypeError:
+                    draw.text((cx, y), seg, font=self.em, fill=fill, anchor="lm")
+                seg_w = self.measure_w(font_key, seg)
+            cx += seg_w
+
+
+if sys.platform == "win32":
+    class _Win32GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", ctypes.c_uint32),
+            ("Data2", ctypes.c_uint16),
+            ("Data3", ctypes.c_uint16),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    class _DXGI_SWAP_CHAIN_DESC1(ctypes.Structure):
+        _fields_ = [
+            ("Width", wintypes.UINT),
+            ("Height", wintypes.UINT),
+            ("Format", wintypes.UINT),
+            ("Stereo", wintypes.BOOL),
+            ("SampleCount", wintypes.UINT),
+            ("SampleQuality", wintypes.UINT),
+            ("BufferUsage", wintypes.UINT),
+            ("BufferCount", wintypes.UINT),
+            ("Scaling", wintypes.UINT),
+            ("SwapEffect", wintypes.UINT),
+            ("AlphaMode", wintypes.UINT),
+            ("Flags", wintypes.UINT),
+        ]
+
+    _DCOMP_WNDPROC_TYPE = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t)
+
+    class _WNDCLASSEXW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.UINT),
+            ("style", wintypes.UINT),
+            ("lpfnWndProc", _DCOMP_WNDPROC_TYPE),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", wintypes.HINSTANCE),
+            ("hIcon", wintypes.HICON),
+            ("hCursor", wintypes.HCURSOR),
+            ("hbrBackground", wintypes.HBRUSH),
+            ("lpszMenuName", wintypes.LPCWSTR),
+            ("lpszClassName", wintypes.LPCWSTR),
+            ("hIconSm", wintypes.HICON),
+        ]
+
+    _win32_user.RegisterClassExW.argtypes = [ctypes.POINTER(_WNDCLASSEXW)]
+    _win32_user.RegisterClassExW.restype  = wintypes.ATOM
+    _win32_user.CreateWindowExW.argtypes  = [
+        wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, ctypes.c_void_p,
+    ]
+    _win32_user.CreateWindowExW.restype   = wintypes.HWND
+
+    _IID_IDXGIDevice         = _Win32GUID(0x54ec77fa, 0x1377, 0x44e6, (ctypes.c_ubyte * 8)(0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c))
+    _IID_IDXGIFactory2       = _Win32GUID(0x50c83a1c, 0xe072, 0x4c48, (ctypes.c_ubyte * 8)(0x87, 0xb0, 0x36, 0x30, 0xfa, 0x36, 0xa6, 0xd0))
+    _IID_IDCompositionDevice = _Win32GUID(0xc37ea93a, 0xe7aa, 0x450d, (ctypes.c_ubyte * 8)(0xb1, 0x6f, 0x97, 0x46, 0xcb, 0x04, 0x07, 0xf3))
+    _IID_ID3D11Texture2D     = _Win32GUID(0x6f15aaf2, 0xd208, 0x4e89, (ctypes.c_ubyte * 8)(0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c))
+
+    _DCOMP_CLASS_NAME = "Aion2WeedMetterDComp"
+    _DCOMP_INSTANCES  = {}
+    _DCOMP_CLASS_REG  = False
+
+    def _dcomp_wndproc_dispatch(hwnd, msg, wparam, lparam):
+        if msg == 0x000F:  # WM_PAINT
+            _win32_user.ValidateRect(hwnd, None)
+            return 0
+        if msg == 0x0014:  # WM_ERASEBKGND
+            return 1
+        if msg == 0x0021:  # WM_MOUSEACTIVATE -> MA_NOACTIVATE
+            return 3
+        if msg == 0x0082:  # WM_NCDESTROY
+            _DCOMP_INSTANCES.pop(hwnd, None)
+        surf = _DCOMP_INSTANCES.get(hwnd)
+        if surf is not None:
+            res = surf._handle_msg(hwnd, msg, wparam, lparam)
+            if res is not None:
+                return res
+        return _win32_user.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    _DCOMP_WNDPROC_CB = _DCOMP_WNDPROC_TYPE(_dcomp_wndproc_dispatch)
+
+    def _com_call(ptr, vtbl_idx, restype, argtypes, *args):
+        vtbl = ctypes.cast(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))
+        fn = ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtbl[vtbl_idx])
+        return fn(ptr, *args)
+
+
+class DCompOverlaySurface:
+    """
+    Superfície DirectComposition + D3D11 SwapChain (DXGI_ALPHA_MODE_PREMULTIPLIED)
+    sobre HWND com WS_EX_NOREDIRECTIONBITMAP: zero GDI bitmap, zero LWA_COLORKEY, zero SetWindowRgn.
+    """
+    WS_EX_TRANSPARENT         = 0x00000020
+    WS_EX_TOOLWINDOW          = 0x00000080
+    WS_EX_TOPMOST             = 0x00000008
+    WS_EX_LAYERED             = 0x00080000
+    WS_EX_NOREDIRECTIONBITMAP = 0x00200000
+    WS_EX_NOACTIVATE          = 0x08000000
+    BASE_EX_STYLE             = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+
+    def __init__(self, owner, x, y, width, height):
+        self.owner = owner
+        self.width = int(width)
+        self.height = int(height)
+        self.hwnd = None
+        self._dragging = False
+        self._drag_dx = 0
+        self._drag_dy = 0
+        self._press_px = 0
+        self._press_py = 0
+        self._press_ly = 0
+
+        self._d3d_dev = ctypes.c_void_p()
+        self._d3d_ctx = ctypes.c_void_p()
+        self._dxgi_dev = ctypes.c_void_p()
+        self._dxgi_adapter = ctypes.c_void_p()
+        self._dxgi_factory = ctypes.c_void_p()
+        self._swapchain = ctypes.c_void_p()
+        self._dcomp_dev = ctypes.c_void_p()
+        self._dcomp_target = ctypes.c_void_p()
+        self._dcomp_visual = ctypes.c_void_p()
+
+        self._init_window_and_dcomp(x, y)
+
+    def _init_window_and_dcomp(self, x, y):
+        global _DCOMP_CLASS_REG
+        hinst = _win32_kernel.GetModuleHandleW(None)
+        if not _DCOMP_CLASS_REG:
+            wc = _WNDCLASSEXW()
+            wc.cbSize = ctypes.sizeof(_WNDCLASSEXW)
+            wc.style = 0
+            wc.lpfnWndProc = _DCOMP_WNDPROC_CB
+            wc.cbClsExtra = 0
+            wc.cbWndExtra = 0
+            wc.hInstance = hinst
+            wc.hIcon = None
+            wc.hCursor = _win32_user.LoadCursorW(None, ctypes.c_void_p(32512))  # IDC_ARROW
+            wc.hbrBackground = None
+            wc.lpszMenuName = None
+            wc.lpszClassName = _DCOMP_CLASS_NAME
+            wc.hIconSm = None
+            atom = _win32_user.RegisterClassExW(ctypes.byref(wc))
+            if atom or ctypes.GetLastError() == 1410:
+                _DCOMP_CLASS_REG = True
+
+        hwnd = _win32_user.CreateWindowExW(
+            self.BASE_EX_STYLE,
+            _DCOMP_CLASS_NAME,
+            "Aion 2 Weed Metter Overlay",
+            0x80000000,  # WS_POPUP (oculto até o 1o frame!)
+            int(x), int(y), self.width, self.height,
+            None, None, hinst, None
+        )
+        if not hwnd:
+            raise RuntimeError(f"CreateWindowExW DComp falhou (err={ctypes.GetLastError()})")
+        self.hwnd = hwnd
+        _DCOMP_INSTANCES[hwnd] = self
+
+        try:
+            val_one = ctypes.c_int(1)
+            for attr in (2, 3, 12):
+                _win32_dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val_one), 4)
+        except Exception:
+            pass
+
+        d3d11 = ctypes.WinDLL("d3d11")
+        dcomp = ctypes.WinDLL("dcomp")
+        d3d11.D3D11CreateDevice.argtypes = [
+            ctypes.c_void_p, wintypes.UINT, wintypes.HMODULE, wintypes.UINT,
+            ctypes.c_void_p, wintypes.UINT, wintypes.UINT,
+            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT), ctypes.POINTER(ctypes.c_void_p),
+        ]
+        d3d11.D3D11CreateDevice.restype = ctypes.c_long
+        dcomp.DCompositionCreateDevice.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(_Win32GUID), ctypes.POINTER(ctypes.c_void_p)
+        ]
+        dcomp.DCompositionCreateDevice.restype = ctypes.c_long
+
+        fl = wintypes.UINT(0)
+        hr = d3d11.D3D11CreateDevice(
+            None, 1, None, 0x20, None, 0, 7,
+            ctypes.byref(self._d3d_dev), ctypes.byref(fl), ctypes.byref(self._d3d_ctx)
+        )
+        if hr < 0:
+            hr = d3d11.D3D11CreateDevice(
+                None, 5, None, 0x20, None, 0, 7,
+                ctypes.byref(self._d3d_dev), ctypes.byref(fl), ctypes.byref(self._d3d_ctx)
+            )
+        if hr < 0:
+            self.destroy()
+            raise RuntimeError(f"D3D11CreateDevice falhou: hr={hex(hr & 0xFFFFFFFF)}")
+
+        def _chk(hr_val, label):
+            if hr_val < 0:
+                self.destroy()
+                raise RuntimeError(f"{label} falhou: hr={hex(hr_val & 0xFFFFFFFF)}")
+
+        _chk(_com_call(self._d3d_dev, 0, ctypes.c_long, (ctypes.POINTER(_Win32GUID), ctypes.POINTER(ctypes.c_void_p)), ctypes.byref(_IID_IDXGIDevice), ctypes.byref(self._dxgi_dev)), "QI IDXGIDevice")
+        _chk(_com_call(self._dxgi_dev, 7, ctypes.c_long, (ctypes.POINTER(ctypes.c_void_p),), ctypes.byref(self._dxgi_adapter)), "GetAdapter")
+        _chk(_com_call(self._dxgi_adapter, 6, ctypes.c_long, (ctypes.POINTER(_Win32GUID), ctypes.POINTER(ctypes.c_void_p)), ctypes.byref(_IID_IDXGIFactory2), ctypes.byref(self._dxgi_factory)), "GetParent Factory2")
+
+        desc = _DXGI_SWAP_CHAIN_DESC1()
+        desc.Width = self.width
+        desc.Height = self.height
+        desc.Format = 87          # DXGI_FORMAT_B8G8R8A8_UNORM
+        desc.Stereo = 0
+        desc.SampleCount = 1
+        desc.SampleQuality = 0
+        desc.BufferUsage = 0x20   # DXGI_USAGE_RENDER_TARGET_OUTPUT
+        desc.BufferCount = 2
+        desc.Scaling = 0          # DXGI_SCALING_STRETCH
+        desc.SwapEffect = 3       # DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
+        desc.AlphaMode = 1        # DXGI_ALPHA_MODE_PREMULTIPLIED
+        desc.Flags = 0
+
+        _chk(_com_call(
+            self._dxgi_factory, 24, ctypes.c_long,
+            (ctypes.c_void_p, ctypes.POINTER(_DXGI_SWAP_CHAIN_DESC1), ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
+            self._d3d_dev, ctypes.byref(desc), None, ctypes.byref(self._swapchain)
+        ), "CreateSwapChainForComposition")
+
+        _chk(dcomp.DCompositionCreateDevice(self._dxgi_dev, ctypes.byref(_IID_IDCompositionDevice), ctypes.byref(self._dcomp_dev)), "DCompositionCreateDevice")
+        _chk(_com_call(self._dcomp_dev, 6, ctypes.c_long, (wintypes.HWND, wintypes.BOOL, ctypes.POINTER(ctypes.c_void_p)), hwnd, 1, ctypes.byref(self._dcomp_target)), "CreateTargetForHwnd")
+        _chk(_com_call(self._dcomp_dev, 7, ctypes.c_long, (ctypes.POINTER(ctypes.c_void_p),), ctypes.byref(self._dcomp_visual)), "CreateVisual")
+        _chk(_com_call(self._dcomp_visual, 15, ctypes.c_long, (ctypes.c_void_p,), self._swapchain), "SetContent")
+        _chk(_com_call(self._dcomp_target, 3, ctypes.c_long, (ctypes.c_void_p,), self._dcomp_visual), "SetRoot")
+        _chk(_com_call(self._dcomp_dev, 3, ctypes.c_long, ()), "Commit")
+
+    def show(self, topmost=True):
+        if not self.hwnd:
+            return
+        _win32_user.ShowWindow(self.hwnd, 8)  # SW_SHOWNA (sem roubar foco!)
+        if topmost:
+            _win32_user.SetWindowPos(self.hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+
+    def hide(self):
+        if self.hwnd:
+            _win32_user.ShowWindow(self.hwnd, 0)  # SW_HIDE
+
+    def set_position(self, x, y, topmost=True):
+        if not self.hwnd:
+            return
+        flags = 0x0001 | 0x0010 | (0x0000 if topmost else 0x0004)  # SWP_NOSIZE | SWP_NOACTIVATE
+        z = wintypes.HWND(-1) if topmost else None
+        _win32_user.SetWindowPos(self.hwnd, z, int(x), int(y), 0, 0, flags)
+
+    def resize(self, width, height):
+        w = max(1, int(width))
+        h = max(1, int(height))
+        if w == self.width and h == self.height:
+            return True
+        if not self.hwnd or not self._swapchain.value:
+            return False
+        self.width = w
+        self.height = h
+        _win32_user.SetWindowPos(self.hwnd, None, 0, 0, w, h, 0x0002 | 0x0004 | 0x0010)
+        hr = _com_call(
+            self._swapchain, 13, ctypes.c_long,
+            (wintypes.UINT, wintypes.UINT, wintypes.UINT, ctypes.c_uint, wintypes.UINT),
+            2, w, h, 87, 0
+        )
+        return hr >= 0
+
+    def upload_rgba_image(self, rgba_im):
+        """Converte PIL RGBA -> BGRA pré-multiplicado em C e apresenta via DirectComposition SwapChain."""
+        if not self.hwnd or not self._swapchain.value:
+            return False
+        if rgba_im.size != (self.width, self.height):
+            self.resize(rgba_im.size[0], rgba_im.size[1])
+        bgra_bytes = rgba_im.convert("RGBa").tobytes("raw", "BGRa")
+        tex = ctypes.c_void_p()
+        hr_buf = _com_call(
+            self._swapchain, 9, ctypes.c_long,
+            (wintypes.UINT, ctypes.POINTER(_Win32GUID), ctypes.POINTER(ctypes.c_void_p)),
+            0, ctypes.byref(_IID_ID3D11Texture2D), ctypes.byref(tex)
+        )
+        if hr_buf < 0 or not tex.value:
+            return False
+        try:
+            buf_ptr = ctypes.cast(ctypes.c_char_p(bgra_bytes), ctypes.c_void_p)
+            _com_call(
+                self._d3d_ctx, 48, None,
+                (ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT, wintypes.UINT),
+                tex, 0, None, buf_ptr, self.width * 4, 0
+            )
+        finally:
+            _com_call(tex, 2, wintypes.ULONG, ())
+        hr_p = _com_call(self._swapchain, 8, ctypes.c_long, (wintypes.UINT, wintypes.UINT), 0, 0)
+        hr_c = _com_call(self._dcomp_dev, 3, ctypes.c_long, ())
+        return (hr_p >= 0 and hr_c >= 0)
+
+    def set_click_through(self, transparent):
+        if not self.hwnd:
+            return
+        ex = self.BASE_EX_STYLE
+        if transparent:
+            # Cross-process click-through em WS_EX_NOREDIRECTIONBITMAP sem chamar SetLayeredWindowAttributes!
+            ex |= (self.WS_EX_LAYERED | self.WS_EX_TRANSPARENT)
+        _set_win_long(self.hwnd, -20, ex)
+        _win32_user.SetWindowPos(self.hwnd, None, 0, 0, 0, 0, 0x0037)
+
+    def _handle_msg(self, hwnd, msg, wparam, lparam):
+        owner = self.owner
+        if owner is None:
+            return None
+        if msg == 0x0201:  # WM_LBUTTONDOWN
+            if getattr(owner, "is_click_through", False) and not getattr(owner, "is_hovered", False):
+                return 0
+            lx = ctypes.c_short(lparam & 0xFFFF).value
+            ly = ctypes.c_short((lparam >> 16) & 0xFFFF).value
+            if getattr(owner, "is_hovered", False) and ly <= MONSTER_BAR_H + 2:
+                for x0, y0, x1, y1, action in getattr(owner, "_dcomp_button_rects", ()):
+                    if x0 <= lx <= x1 and y0 <= ly <= y1:
+                        owner.root.after(0, lambda act=action: owner._on_dcomp_button(act))
+                        return 0
+            pt = _Win32Point()
+            _win32_user.GetCursorPos(ctypes.byref(pt))
+            self._dragging = True
+            self._press_px = pt.x
+            self._press_py = pt.y
+            self._press_ly = ly
+            self._drag_dx = pt.x - getattr(owner, "_cur_win_x", 80)
+            self._drag_dy = pt.y - getattr(owner, "_cur_win_y", 80)
+            _win32_user.SetCapture(hwnd)
+            owner._enforce_z_order()
+            return 0
+
+        if msg == 0x0200:  # WM_MOUSEMOVE
+            if self._dragging:
+                pt = _Win32Point()
+                _win32_user.GetCursorPos(ctypes.byref(pt))
+                nx = pt.x - self._drag_dx
+                ny = pt.y - self._drag_dy
+                owner._cur_win_x = nx
+                owner._cur_win_y = ny
+                self.set_position(nx, ny, topmost=True)
+            return 0
+
+        if msg == 0x0202:  # WM_LBUTTONUP
+            if self._dragging:
+                self._dragging = False
+                _win32_user.ReleaseCapture()
+                pt = _Win32Point()
+                _win32_user.GetCursorPos(ctypes.byref(pt))
+                owner._enforce_z_order()
+                if not getattr(owner, "is_click_through", False):
+                    if abs(pt.x - self._press_px) < 5 and abs(pt.y - self._press_py) < 5:
+                        if self._press_ly >= MONSTER_BAR_H + 4:
+                            owner.root.after(0, owner.toggle_mode)
+            return 0
+
+        if msg == 0x0205:  # WM_RBUTTONUP
+            if getattr(owner, "is_click_through", False):
+                return 0
+            ly = ctypes.c_short((lparam >> 16) & 0xFFFF).value
+            if ly <= MONSTER_BAR_H + 2:
+                owner.root.after(0, owner.edit_player_name)
+            else:
+                row_idx = max(0, min(max(0, getattr(owner, "visible_rows", 1) - 1), int((ly - (MONSTER_BAR_H + 4)) // (PLAYER_BAR_H + 3))))
+                owner.root.after(0, lambda r=row_idx: owner.edit_row_player(r))
+            return 0
+
+        return None
+
+    def destroy(self):
+        if self._dragging:
+            self._dragging = False
+            try:
+                _win32_user.ReleaseCapture()
+            except Exception:
+                pass
+        for attr in ("_dcomp_visual", "_dcomp_target", "_swapchain", "_dcomp_dev", "_dxgi_factory", "_dxgi_adapter", "_dxgi_dev", "_d3d_ctx", "_d3d_dev"):
+            p = getattr(self, attr, None)
+            if p and getattr(p, "value", None):
+                try:
+                    _com_call(p, 2, wintypes.ULONG, ())
+                except Exception:
+                    pass
+                p.value = None
+        if self.hwnd:
+            hwnd = self.hwnd
+            self.hwnd = None
+            _DCOMP_INSTANCES.pop(hwnd, None)
+            try:
+                _win32_user.DestroyWindow(hwnd)
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────
@@ -2531,16 +3091,17 @@ class OverlayDPSMeter:
             except Exception:
                 pass
         self.taskbar_win.geometry("1x1+-32000+-32000")
-        try:
-            self.taskbar_win.attributes("-alpha", 0.0)
-        except Exception:
-            pass
         self.taskbar_win.protocol("WM_DELETE_WINDOW", self.on_close)
         self.taskbar_win.bind("<Unmap>", self._on_taskbar_unmap)
         self.taskbar_win.bind("<Map>", self._on_taskbar_map)
 
         cfg = load_config()
-        self.performance_mode = bool(cfg.get("performance_mode", False) if performance_mode is None else performance_mode)
+        self.performance_mode = bool(
+            cfg.get("performance_mode", sys.platform == "win32")
+            if performance_mode is None else performance_mode
+        )
+        if sys.platform != "win32":
+            self.performance_mode = False
         raw_ui_ms = cfg.get("ui_refresh_ms", 160) if ui_refresh_ms is None else ui_refresh_ms
         try:
             self.ui_refresh_ms = max(100, min(250, int(raw_ui_ms)))
@@ -2548,15 +3109,21 @@ class OverlayDPSMeter:
             self.ui_refresh_ms = 160
         self._ui_dirty        = False
         self._last_ui_paint_t = 0.0
-        self._last_rgn_sig    = None
+        self._dcomp           = None
+        self._dcomp_fonts     = _DCompFontSet() if sys.platform == "win32" else None
+        self._dcomp_monster   = {}
+        self._dcomp_rows      = [{} for _ in range(6)]
+        self._dcomp_button_rects = []
+        self._dcomp_dirty     = False
+        self._dcomp_last_sig  = None
 
-        # 2. Sistema Dual-Layer Transparente (padrão) vs Single-HWND Performance Mode (MPO-Safe / sem LWA_COLORKEY):
+        # 2. Backend gráfico: DirectComposition + WS_EX_NOREDIRECTIONBITMAP (padrão) vs Dual-Layer Tkinter Clássico:
         self.bar_opacity = 0.60
 
         self.bg_win = tk.Toplevel(self.taskbar_win)
         self.bg_win.title("Aion 2 Weed Metter Background")
         self.bg_win.overrideredirect(True)
-        self.bg_win.geometry(f"{HUD_WIDTH}x68+80+80")
+        self.bg_win.geometry(f"{HUD_WIDTH}x63+80+80")
         self.bg_win.attributes("-topmost", True)
         self.bg_win.configure(bg=TRANSPARENT_KEY)
         try:
@@ -2573,18 +3140,22 @@ class OverlayDPSMeter:
         self.root = tk.Toplevel(self.taskbar_win)
         self.root.title("Aion 2 Weed Metter")
         self.root.overrideredirect(True)
-        self.root.geometry(f"{HUD_WIDTH}x68+80+80")
+        self.root.geometry(f"{HUD_WIDTH}x63+80+80")
         self.root.attributes("-topmost", True)
-        self.root.configure(bg="#16121a" if self.performance_mode else TRANSPARENT_KEY)
-        if not self.performance_mode:
+        self.root.configure(bg=TRANSPARENT_KEY)
+        try:
+            self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
+        except Exception:
+            pass
+        if self.performance_mode:
             try:
-                self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
+                self.root.withdraw()
             except Exception:
                 pass
 
         self._cur_win_x = 80
         self._cur_win_y = 80
-        self._cur_win_h = 68
+        self._cur_win_h = 63
 
         # REGRA UNIVERSAL: NUNCA pré-selecionar nenhum personagem ao iniciar o medidor!
         # O medidor SEMPRE inicia em estado neutro ("Aguardando identificar jogador")
@@ -2665,16 +3236,31 @@ class OverlayDPSMeter:
 
         self.pill_renderer = PillRenderer()
         self.class_icons   = {}
+        self.class_pils    = {}
         self.cp_icons      = {}
         self.skull_icons   = {}
+        self.swords_pil    = None
+        self.skull_pil     = None
         self.load_class_icons()
 
         self.event_queue = queue.Queue()
         self.sniffer     = SnifferThread(self.event_queue)
 
         self.build_ui()
+        if self.performance_mode:
+            if not self._init_dcomp_surface():
+                self.performance_mode = False
+                try:
+                    self.bg_win.deiconify()
+                    self.root.deiconify()
+                except Exception:
+                    pass
         self.show_standby_local_player()
-        self.root.after(50, self._apply_win32_overlay_styles)
+        if self._is_dcomp_active():
+            self._flush_dcomp_if_dirty(force=True)
+            self._dcomp.show(topmost=True)
+        else:
+            self.root.after(50, self._apply_win32_overlay_styles)
         self.sniffer.start()
 
         self.root.bind("<Enter>", self.on_hover_enter)
@@ -2685,9 +3271,174 @@ class OverlayDPSMeter:
         self.update_loop()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    def _is_dcomp_active(self):
+        return bool(getattr(self, "performance_mode", False) and getattr(self, "_dcomp", None) and self._dcomp.hwnd)
+
+    def _init_dcomp_surface(self):
+        if sys.platform != "win32":
+            return False
+        if getattr(self, "_dcomp", None) and self._dcomp.hwnd:
+            return True
+        try:
+            wx = int(getattr(self, "_cur_win_x", 80) or 80)
+            wy = int(getattr(self, "_cur_win_y", 80) or 80)
+            wh = int(getattr(self, "_cur_win_h", 63) or 63)
+            self._dcomp = DCompOverlaySurface(self, wx, wy, HUD_WIDTH, wh)
+            self._dcomp_dirty = True
+            self._dcomp_last_sig = None
+            return True
+        except Exception:
+            self._dcomp = None
+            return False
+
+    def _destroy_dcomp_surface(self):
+        dc = getattr(self, "_dcomp", None)
+        if dc is not None:
+            self._dcomp = None
+            try:
+                dc.destroy()
+            except Exception:
+                pass
+        self._dcomp_button_rects = []
+        self._dcomp_last_sig = None
+
+    def _on_dcomp_button(self, action):
+        if action == "boss":
+            self.toggle_boss_only()
+        elif action == "mode":
+            self.toggle_mode()
+        elif action == "reset":
+            self.reset_metrics()
+        elif action == "pause":
+            self.toggle_pause()
+        elif action == "perf":
+            self.toggle_performance_mode()
+        elif action == "lock":
+            self.toggle_click_through()
+        elif action == "close":
+            self.on_close()
+
+    def _render_dcomp_frame(self):
+        fonts = self._dcomp_fonts
+        if fonts is None:
+            fonts = self._dcomp_fonts = _DCompFontSet()
+        cnt = max(1, min(6, int(getattr(self, "visible_rows", 1) or 1)))
+        win_h = (MONSTER_BAR_H + 4) + cnt * (PLAYER_BAR_H + 3)
+        canvas = Image.new("RGBA", (HUD_WIDTH, win_h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(canvas)
+
+        ms = getattr(self, "_dcomp_monster", None) or {}
+        m_ratio = float(ms.get("ratio", 0.36))
+        m_pill = self.pill_renderer.get_monster_pill_pil(m_ratio)
+        canvas.paste(m_pill, (0, 0))
+
+        t_name = ms.get("name", "Aguardando Alvo") or "Aguardando Alvo"
+        fonts.draw_text(draw, 12, 13, t_name, font_key="9b", fill=(255, 255, 255, 255), anchor="lm")
+
+        if self.is_hovered:
+            bx0, by0, bx1, by1 = HUD_WIDTH - 168, 2, HUD_WIDTH - 4, 24
+            draw.rounded_rectangle([bx0, by0, bx1, by1], radius=5, fill=(24, 20, 26, 255), outline=(64, 58, 76, 255), width=1)
+            btns = [
+                ("boss",  "👑" if self.boss_only else "🎯", "#f59e0b" if self.boss_only else "#94a3b8"),
+                ("mode",  "👥" if self.view_mode == "SKILLS" else "📊", "#22c55e" if self.view_mode == "SKILLS" else "#38bdf8"),
+                ("reset", "🔄", "#cbd5e1"),
+                ("pause", "▶" if self.is_paused else "⏸", "#22c55e" if self.is_paused else "#cbd5e1"),
+                ("perf",  "⚡", "#22c55e"),
+                ("lock",  "🔒" if self.is_click_through else "🔓", "#f59e0b" if self.is_click_through else "#cbd5e1"),
+                ("close", "✕", "#f87171"),
+            ]
+            rects = []
+            step_w = (bx1 - bx0 - 4) / len(btns)
+            for bi, (act, glyph, col_hex) in enumerate(btns):
+                rx0 = int(bx0 + 2 + bi * step_w)
+                rx1 = int(bx0 + 2 + (bi + 1) * step_w)
+                cx = (rx0 + rx1) // 2
+                fonts.draw_text(draw, cx, 13, glyph, font_key="9b", fill=_hex_to_rgba(col_hex, 255), anchor="mm")
+                rects.append((rx0, 0, rx1, MONSTER_BAR_H + 2, act))
+            self._dcomp_button_rects = rects
+        else:
+            self._dcomp_button_rects = []
+            r_str = ms.get("right_str", "")
+            r_col = ms.get("right_color", "#ffffff")
+            r_x = ms.get("right_x", HUD_WIDTH - 10)
+            if r_str:
+                fonts.draw_text(draw, HUD_WIDTH - 10, 13, r_str, font_key="9b", fill=_hex_to_rgba(r_col, 255), anchor="rm")
+            ttd_str = ms.get("ttd_str", "")
+            ttd_x = ms.get("ttd_x", r_x - 3)
+            if ttd_str:
+                fonts.draw_text(draw, ttd_x, 13, ttd_str, font_key="9b", fill=(248, 113, 113, 255), anchor="rm")
+            left_str = ms.get("left_str", "")
+            left_x = ms.get("left_x", HUD_WIDTH - 120)
+            if left_str:
+                fonts.draw_text(draw, left_x, 13, left_str, font_key="9b", fill=(255, 255, 255, 255), anchor="rm")
+
+        d_rows = getattr(self, "_dcomp_rows", ())
+        for i in range(cnt):
+            rd = d_rows[i] if i < len(d_rows) else None
+            if not rd:
+                continue
+            y0 = (MONSTER_BAR_H + 4) + i * (PLAYER_BAR_H + 3)
+            cy = y0 + 15
+            p_pill = self.pill_renderer.get_player_pill_pil(
+                rd.get("p_class", "templar"),
+                rd.get("ratio", 1.0),
+                is_local=rd.get("is_local", False),
+                is_dead=rd.get("is_dead", False),
+            )
+            canvas.paste(p_pill, (0, y0))
+
+            rank_str = rd.get("rank", "")
+            if rank_str:
+                fonts.draw_text(draw, 12, cy, rank_str, font_key="9b", fill=_hex_to_rgba(rd.get("rank_color", "#cbd5e1"), 255), anchor="mm")
+            icon_pil = rd.get("icon_pil")
+            if icon_pil is not None:
+                iw, ih = icon_pil.size
+                canvas.alpha_composite(icon_pil, dest=(28 - iw // 2, cy - ih // 2))
+            name_str = rd.get("name", "")
+            if name_str:
+                fonts.draw_text(draw, 44, cy, name_str, font_key="10b", fill=(255, 255, 255, 255), anchor="lm")
+            cp_str = rd.get("cp", "")
+            if cp_str:
+                if rd.get("show_cp_icon") and self.swords_pil is not None:
+                    sw_x = int(rd.get("cp_img_x", 118))
+                    sh = self.swords_pil.size[1]
+                    canvas.alpha_composite(self.swords_pil, dest=(sw_x, cy - sh // 2))
+                fonts.draw_text(draw, int(rd.get("cp_x", 132)), cy, cp_str, font_key="8b", fill=(56, 189, 248, 255), anchor="lm")
+            death_str = rd.get("death", "")
+            if death_str:
+                if self.skull_pil is not None:
+                    sk_x = int(rd.get("death_img_x", 172))
+                    kh = self.skull_pil.size[1]
+                    canvas.alpha_composite(self.skull_pil, dest=(sk_x, cy - kh // 2))
+                fonts.draw_text(draw, int(rd.get("death_x", 188)), cy, death_str, font_key="8b", fill=(248, 113, 113, 255), anchor="lm")
+            if rd.get("col1"):
+                fonts.draw_text(draw, HUD_WIDTH - 178, cy, rd["col1"], font_key="10b", fill=(255, 255, 255, 255), anchor="rm")
+            if rd.get("col2"):
+                fonts.draw_text(draw, HUD_WIDTH - 120, cy, rd["col2"], font_key="9", fill=(203, 213, 225, 255), anchor="rm")
+            if rd.get("col3"):
+                fonts.draw_text(draw, HUD_WIDTH - 52, cy, rd["col3"], font_key="8b", fill=(251, 191, 36, 255), anchor="rm")
+            if rd.get("col4"):
+                fonts.draw_text(draw, HUD_WIDTH - 8, cy, rd["col4"], font_key="9", fill=(203, 213, 225, 255), anchor="rm")
+
+        return canvas
+
+    def _flush_dcomp_if_dirty(self, force=False):
+        if not self._is_dcomp_active():
+            return
+        if not force and not getattr(self, "_dcomp_dirty", False):
+            return
+        self._dcomp_dirty = False
+        try:
+            frame = self._render_dcomp_frame()
+            self._dcomp.upload_rgba_image(frame)
+        except Exception:
+            pass
+
     def _on_taskbar_unmap(self, event=None):
         if event is None or event.widget == self.taskbar_win:
             try:
+                if self._is_dcomp_active():
+                    self._dcomp.hide()
                 self.root.withdraw()
                 if hasattr(self, "bg_win") and self.bg_win:
                     self.bg_win.withdraw()
@@ -2697,7 +3448,16 @@ class OverlayDPSMeter:
     def _on_taskbar_map(self, event=None):
         if event is None or event.widget == self.taskbar_win:
             try:
-                if not self.performance_mode and hasattr(self, "bg_win") and self.bg_win:
+                if self._is_dcomp_active():
+                    self.root.withdraw()
+                    if hasattr(self, "bg_win") and self.bg_win:
+                        self.bg_win.withdraw()
+                    self._flush_dcomp_if_dirty(force=True)
+                    self._dcomp.show(topmost=True)
+                    self._apply_win32_overlay_styles()
+                    self._enforce_z_order()
+                    return
+                if hasattr(self, "bg_win") and self.bg_win:
                     self.bg_win.deiconify()
                     self.bg_win.attributes("-topmost", True)
                 self.root.deiconify()
@@ -2718,58 +3478,47 @@ class OverlayDPSMeter:
             return 0
 
     def _get_top_hwnd(self):
+        if self._is_dcomp_active():
+            return self._dcomp.hwnd
         return self._get_win_hwnd(self.root)
 
     def _enforce_z_order(self):
-        """Garante self.root no topo e, fora do Modo Performance, mantém self.bg_win logo abaixo."""
+        """Mantém a janela de overlay ativa no topo (DirectComposition HWND ou Dual-Layer root + bg_win)."""
         if sys.platform != "win32":
             return
         try:
             flags = 0x0001 | 0x0002 | 0x0010  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+            if self._is_dcomp_active():
+                _win32_user.SetWindowPos(self._dcomp.hwnd, wintypes.HWND(-1), 0, 0, 0, 0, flags)
+                return
             h_fg = self._get_win_hwnd(self.root)
             if h_fg:
                 _win32_user.SetWindowPos(h_fg, wintypes.HWND(-1), 0, 0, 0, 0, flags)
-            if not self.performance_mode:
-                h_bg = self._get_win_hwnd(self.bg_win) if getattr(self, "bg_win", None) else 0
-                if h_bg and h_fg:
-                    _win32_user.SetWindowPos(h_bg, h_fg, 0, 0, 0, 0, flags)
-        except Exception:
-            pass
-
-    def _update_window_region(self, count=None, force=False):
-        """No Modo Performance, recorta self.root via HRGN nas barras arredondadas para eliminar WS_EX_LAYERED / LWA_COLORKEY."""
-        if sys.platform != "win32" or not self.performance_mode:
-            return
-        try:
-            hwnd = self._get_win_hwnd(self.root)
-            if not hwnd:
-                return
-            cnt = max(1, count or getattr(self, "visible_rows", 1) or 1)
-            sig = (cnt, True)
-            if not force and sig == getattr(self, "_last_rgn_sig", None):
-                return
-            rgn_total = _win32_gdi.CreateRoundRectRgn(0, 0, HUD_WIDTH + 1, MONSTER_BAR_H + 1, 12, 12)
-            if not rgn_total:
-                return
-            for i in range(cnt):
-                y0 = (MONSTER_BAR_H + 4) + i * (PLAYER_BAR_H + 3)
-                y1 = y0 + PLAYER_BAR_H + 1
-                rgn_row = _win32_gdi.CreateRoundRectRgn(0, y0, HUD_WIDTH + 1, y1, 12, 12)
-                if rgn_row:
-                    _win32_gdi.CombineRgn(rgn_total, rgn_total, rgn_row, 2)  # RGN_OR = 2
-                    _win32_gdi.DeleteObject(rgn_row)
-            if _win32_user.SetWindowRgn(hwnd, rgn_total, True):
-                self._last_rgn_sig = sig
-            else:
-                _win32_gdi.DeleteObject(rgn_total)
+            h_bg = self._get_win_hwnd(self.bg_win) if getattr(self, "bg_win", None) else 0
+            if h_bg and h_fg:
+                _win32_user.SetWindowPos(h_bg, h_fg, 0, 0, 0, 0, flags)
         except Exception:
             pass
 
     def _apply_win32_overlay_styles(self):
-        """Configura atributos nativos Win32/DWM (Dual-Layer Transparente ou Single-HWND Performance Mode sem LWA_COLORKEY)."""
+        """Configura atributos nativos Win32/DWM (DirectComposition sem GDI bitmap ou Dual-Layer Clássico limpo)."""
         if sys.platform != "win32":
             return
         try:
+            if self._is_dcomp_active():
+                if getattr(self, "bg_win", None):
+                    try:
+                        self.bg_win.withdraw()
+                    except Exception:
+                        pass
+                try:
+                    self.root.withdraw()
+                except Exception:
+                    pass
+                self._dcomp.set_click_through(self._win32_transparent_applied)
+                self._enforce_z_order()
+                return
+
             GWL_EXSTYLE       = -20
             WS_EX_TRANSPARENT = 0x00000020
             WS_EX_TOOLWINDOW  = 0x00000080
@@ -2779,43 +3528,14 @@ class OverlayDPSMeter:
             r_k, g_k, b_k = TRANSPARENT_RGB[0], TRANSPARENT_RGB[1], TRANSPARENT_RGB[2]
             cr_key = (b_k << 16) | (g_k << 8) | r_k
             val_one = ctypes.c_int(1)
-            val_none = ctypes.c_uint(0xFFFFFFFE)  # DWMWA_COLOR_NONE
 
             def _apply_dwm_attrs(hwnd):
-                for attr in (2, 3, 12, 33, 38):
+                # Apenas atributos seguros do 570102f (sem DWMWA 34/38 que forçam VSync de 60/70Hz no Win11!)
+                for attr in (2, 3, 12, 33):
                     try:
                         _win32_dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val_one), 4)
                     except Exception:
                         pass
-                try:
-                    _win32_dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(val_none), 4)
-                except Exception:
-                    pass
-
-            if self.performance_mode:
-                if getattr(self, "bg_win", None):
-                    try:
-                        self.bg_win.withdraw()
-                    except Exception:
-                        pass
-                hwnd_fg = self._get_win_hwnd(self.root)
-                if hwnd_fg:
-                    _apply_dwm_attrs(hwnd_fg)
-                    ex_style = _get_win_long(hwnd_fg, GWL_EXSTYLE)
-                    ex_style |= (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
-                    if self._win32_transparent_applied:
-                        # Cross-process click-through exige WS_EX_LAYERED, porém usa LWA_ALPHA=255 (ZERO chroma-key!)
-                        ex_style |= (WS_EX_LAYERED | WS_EX_TRANSPARENT)
-                    else:
-                        # Destravado: remove completamente WS_EX_LAYERED e LWA_COLORKEY para preservar Direct Flip / MPO!
-                        ex_style &= ~(WS_EX_LAYERED | WS_EX_TRANSPARENT)
-                    _set_win_long(hwnd_fg, GWL_EXSTYLE, ex_style)
-                    _win32_user.SetWindowPos(hwnd_fg, None, 0, 0, 0, 0, 0x0037)
-                    if self._win32_transparent_applied:
-                        _win32_user.SetLayeredWindowAttributes(hwnd_fg, 0, 255, 2)  # LWA_ALPHA sólido
-                self._update_window_region(self.visible_rows or 1, force=True)
-                self._enforce_z_order()
-                return
 
             def _setup_hwnd(hwnd, is_bg):
                 if not hwnd:
@@ -2836,11 +3556,7 @@ class OverlayDPSMeter:
                 else:
                     _win32_user.SetLayeredWindowAttributes(hwnd, cr_key, 0, 1)        # LWA_COLORKEY puro
 
-            hwnd_fg = self._get_win_hwnd(self.root)
-            if hwnd_fg:
-                _win32_user.SetWindowRgn(hwnd_fg, 0, True)
-                self._last_rgn_sig = None
-            _setup_hwnd(hwnd_fg, is_bg=False)
+            _setup_hwnd(self._get_win_hwnd(self.root), is_bg=False)
             if getattr(self, "bg_win", None):
                 _setup_hwnd(self._get_win_hwnd(self.bg_win), is_bg=True)
             self._enforce_z_order()
@@ -2848,29 +3564,17 @@ class OverlayDPSMeter:
             pass
 
     def _set_win32_transparent(self, transparent):
-        """Ativa/desativa click-through respeitando Dual-Layer vs Modo Performance (MPO-Safe)."""
+        """Ativa/desativa click-through (DirectComposition ou Dual-Layer Clássico)."""
         if sys.platform != "win32" or transparent == self._win32_transparent_applied:
             return
         self._win32_transparent_applied = transparent
         try:
-            GWL_EXSTYLE       = -20
-            WS_EX_TRANSPARENT = 0x00000020
-            WS_EX_LAYERED     = 0x00080000
-            if self.performance_mode:
-                hwnd = self._get_win_hwnd(self.root)
-                if hwnd:
-                    ex_style = _get_win_long(hwnd, GWL_EXSTYLE)
-                    if transparent:
-                        ex_style |= (WS_EX_LAYERED | WS_EX_TRANSPARENT)
-                    else:
-                        ex_style &= ~(WS_EX_LAYERED | WS_EX_TRANSPARENT)
-                    _set_win_long(hwnd, GWL_EXSTYLE, ex_style)
-                    _win32_user.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0037)
-                    if transparent:
-                        _win32_user.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
-                    self._update_window_region(self.visible_rows or 1, force=True)
+            if self._is_dcomp_active():
+                self._dcomp.set_click_through(transparent)
                 return
 
+            GWL_EXSTYLE       = -20
+            WS_EX_TRANSPARENT = 0x00000020
             for win in (self.root, getattr(self, "bg_win", None)):
                 hwnd = self._get_win_hwnd(win)
                 if hwnd:
@@ -2887,9 +3591,14 @@ class OverlayDPSMeter:
     def _show_hover_controls(self, show):
         if show and not self.is_hovered:
             self.is_hovered = True
+            if self._is_dcomp_active():
+                self._dcomp_dirty = True
+                self._flush_dcomp_if_dirty()
+                self._enforce_z_order()
+                return
             self.hover_frame.place(x=HUD_WIDTH - 168, y=2, width=164, height=22)
             self.hover_frame.lift()
-            if not self.performance_mode and getattr(self, "bg_hover_frame", None):
+            if getattr(self, "bg_hover_frame", None):
                 self.bg_hover_frame.place(x=HUD_WIDTH - 168, y=2, width=164, height=22)
                 self.bg_hover_frame.lift()
             self.monster_canvas.itemconfigure(self.m_info_txt, state="hidden")
@@ -2901,6 +3610,10 @@ class OverlayDPSMeter:
             self._enforce_z_order()
         elif not show and self.is_hovered:
             self.is_hovered = False
+            if self._is_dcomp_active():
+                self._dcomp_dirty = True
+                self._flush_dcomp_if_dirty()
+                return
             self.hover_frame.place_forget()
             if getattr(self, "bg_hover_frame", None):
                 self.bg_hover_frame.place_forget()
@@ -2914,10 +3627,9 @@ class OverlayDPSMeter:
     def _sync_hover_and_click_through(self):
         """
         Sincroniza a barra de controles (📊 🔄 ⏸ 🔓 ✕) e o estado Click-Through:
-        - Quando destravado (🔓): WS_EX_TRANSPARENT desligado; mostra controles ao passar o mouse no medidor.
-        - Quando travado (🔒): barras de DPS ficam 100% Click-Through (WS_EX_TRANSPARENT ligado),
+        - Quando destravado (🔓): click-through desligado; mostra controles ao passar o mouse no medidor.
+        - Quando travado (🔒): barras de DPS ficam 100% Click-Through,
           mas ao passar o mouse no topo da barra do monstro, libera o clique nos botões para permitir destravar!
-        Ultra-otimizado com ctypes GetCursorPos direto (zero lag / zero overhead de DWM).
         """
         try:
             if sys.platform == "win32":
@@ -2963,13 +3675,17 @@ class OverlayDPSMeter:
                 b.configure(text="🔓", fg="#cbd5e1")
         self._sync_hover_and_click_through()
         self._update_target_label(is_dead=self.target_is_dead, dur=self._get_fight_duration() if self.in_combat else 0.0)
+        self._dcomp_dirty = True
+        self._flush_dcomp_if_dirty()
 
     def load_class_icons(self):
         # 1. Pré-renderiza as espadinhas finas do CP e a caveira exclusiva Aion 2 Weed Metter
-        #    pré-compostas contra cada tema de classe (barra cheia e trilha escura), eliminando 100% das bordas pretas!
+        #    (PIL RGBA puro para DirectComposition + pré-composto para colorkey do Dual-Layer Clássico)
         try:
             raw_swords = _make_thin_swords_pil()
             raw_skull  = _make_weed_skull_pil()
+            self.swords_pil = raw_swords
+            self.skull_pil  = raw_skull
             for cname in CLASS_THEMES:
                 for is_dead in (False, True):
                     for is_track in (False, True):
@@ -2979,7 +3695,7 @@ class OverlayDPSMeter:
         except Exception:
             pass
 
-        # 2. Carrega e limpa os brasões de classe (removendo a sombra preta embutida e pré-compondo contra a cor da classe)
+        # 2. Carrega e limpa os brasões de classe
         if not os.path.exists(CLASS_ICONS_DIR):
             return
         for cname in ["gladiator", "templar", "assassin", "ranger", "sorcerer", "elementalist", "spiritmaster", "cleric", "chanter", "fighter"]:
@@ -2988,6 +3704,11 @@ class OverlayDPSMeter:
             if os.path.exists(fpath):
                 try:
                     clean_pil = _make_clean_class_pil(fpath)
+                    r, g, b, a = clean_pil.split()
+                    dim_pil = Image.merge("RGBA", (r, g, b, a.point(lambda v: (v * 150) // 255)))
+                    self.class_pils[(cname, False)] = clean_pil
+                    self.class_pils[(cname, True)]  = dim_pil
+                    self.class_pils[cname]          = clean_pil
                     for is_dead in (False, True):
                         bg_rgb = _get_theme_bg_rgb(cname, is_dead=is_dead, is_track=False)
                         photo = ImageTk.PhotoImage(_composite_for_colorkey(clean_pil, bg_rgb, alpha_cutoff=75))
@@ -3125,13 +3846,14 @@ class OverlayDPSMeter:
             return
 
         self._set_win32_transparent(False)
+        dlg_parent = None if self._is_dcomp_active() else self.root
         curr_cp = self.get_player_cp(p_name, p.get("caster_key"))
         init_cp = f"{curr_cp/1000:.1f}K" if curr_cp >= 1000 else (str(curr_cp) if curr_cp > 0 else "")
         new_val = simpledialog.askstring(
             f"Combat Power de {p_name}",
             f"Defina o Combat Power (CP) de {p_name}:\n(Exemplos: 105.9k, 112k, 105900)",
             initialvalue=init_cp,
-            parent=self.root
+            parent=dlg_parent
         )
         self._sync_hover_and_click_through()
         if new_val and new_val.strip():
@@ -3142,6 +3864,7 @@ class OverlayDPSMeter:
                     self._remember_player(p_name, p.get("class"), cp_num, p.get("caster_key"))
                     p["combatPower"] = cp_num
                     self.render_hud(self._get_fight_duration())
+                    self._flush_dcomp_if_dirty()
             except Exception:
                 pass
 
@@ -3149,12 +3872,13 @@ class OverlayDPSMeter:
         if self.is_click_through:
             return
         self._set_win32_transparent(False)
+        dlg_parent = None if self._is_dcomp_active() else self.root
         init_val = self.local_player_name if self.player_identified else ""
         new_name = simpledialog.askstring(
             "Alterar Jogador Local",
             "Digite exatamente o nome do seu personagem no Aion 2:",
             initialvalue=init_val,
-            parent=self.root
+            parent=dlg_parent
         )
         self._sync_hover_and_click_through()
         if new_name and new_name.strip():
@@ -3170,6 +3894,7 @@ class OverlayDPSMeter:
                     break
             if not self.in_combat:
                 self.show_standby_local_player()
+            self._flush_dcomp_if_dirty()
 
     def on_hover_enter(self, event=None):
         self._sync_hover_and_click_through()
@@ -3192,10 +3917,36 @@ class OverlayDPSMeter:
                 pass
         if self.boss_only and not self.encounter_has_boss and not self.active_boss_key:
             self.reset_metrics()
+        self._dcomp_dirty = True
+        self._flush_dcomp_if_dirty()
+
+    def _reset_render_caches(self):
+        self._m_last_pill = None
+        self._m_last_name = None
+        self._m_last_raw_name = None
+        self._m_last_avail_w = None
+        self._m_last_info = None
+        self._m_last_color = None
+        self._m_last_info_x = None
+        self._m_last_ttd = None
+        self._m_last_ttd_x = None
+        self._m_last_left = None
+        self._m_last_left_x = None
+        self._m_last_hidden = False
+        for r in getattr(self, "rows", ()):
+            for k in list(r.keys()):
+                if k.startswith("_last_"):
+                    r[k] = None
 
     def toggle_performance_mode(self):
-        """Alterna entre Dual-Layer Transparente e Modo Performance (Single-HWND + SetWindowRgn sem LWA_COLORKEY)."""
+        """Alterna entre DirectComposition Hardware Overlay (WS_EX_NOREDIRECTIONBITMAP) e Dual-Layer Clássico."""
         self.performance_mode = not self.performance_mode
+        if self.performance_mode:
+            if not self._init_dcomp_surface():
+                self.performance_mode = False
+        else:
+            self._destroy_dcomp_surface()
+
         cfg = load_config()
         cfg["performance_mode"] = self.performance_mode
         save_config(cfg)
@@ -3207,52 +3958,36 @@ class OverlayDPSMeter:
             except Exception:
                 pass
 
-        self._m_last_pill = None
-        for r in getattr(self, "rows", ()):
-            r["_last_pill"] = None
+        self._reset_render_caches()
 
-        if self.performance_mode:
-            if hasattr(self, "monster_canvas"):
-                self.monster_canvas.configure(bg="#16121a")
-            if hasattr(self, "bars_canvas"):
-                self.bars_canvas.configure(bg="#121216")
-            if hasattr(self, "m_fg_bg_img"):
-                self.monster_canvas.itemconfigure(self.m_fg_bg_img, state="normal")
+        if self._is_dcomp_active():
             if getattr(self, "bg_win", None):
                 try:
                     self.bg_win.withdraw()
                 except Exception:
                     pass
             try:
-                self.root.configure(bg="#16121a")
-                self.root.attributes("-transparentcolor", "")
+                self.root.withdraw()
             except Exception:
                 pass
         else:
-            if hasattr(self, "monster_canvas"):
-                self.monster_canvas.configure(bg=TRANSPARENT_KEY)
-            if hasattr(self, "bars_canvas"):
-                self.bars_canvas.configure(bg=TRANSPARENT_KEY)
-            if hasattr(self, "m_fg_bg_img"):
-                self.monster_canvas.itemconfigure(self.m_fg_bg_img, image="", state="hidden")
-            for r in getattr(self, "rows", ()):
-                if r.get("pill"):
-                    try:
-                        r["c"].itemconfigure(r["pill"], image="", state="hidden")
-                    except Exception:
-                        pass
+            wx = int(getattr(self, "_cur_win_x", 80) or 80)
+            wy = int(getattr(self, "_cur_win_y", 80) or 80)
+            wh = int(getattr(self, "_cur_win_h", 63) or 63)
             try:
-                self.root.configure(bg=TRANSPARENT_KEY)
-                self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
-            except Exception:
-                pass
-            if getattr(self, "bg_win", None):
-                try:
+                if getattr(self, "bg_win", None):
+                    self.bg_win.geometry(f"{HUD_WIDTH}x{wh}+{wx}+{wy}")
                     self.bg_win.deiconify()
                     self.bg_win.attributes("-topmost", True)
-                except Exception:
-                    pass
+                self.root.geometry(f"{HUD_WIDTH}x{wh}+{wx}+{wy}")
+                self.root.configure(bg=TRANSPARENT_KEY)
+                self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
+                self.root.deiconify()
+                self.root.attributes("-topmost", True)
+            except Exception:
+                pass
 
+        self._win32_transparent_applied = bool(self.is_click_through and not self.is_hovered)
         self._apply_win32_overlay_styles()
         self._enforce_z_order()
         if self.in_combat and self.combat_start:
@@ -3264,6 +3999,9 @@ class OverlayDPSMeter:
                 self.render_skills(dur)
         else:
             self.show_standby_local_player()
+        if self._is_dcomp_active():
+            self._flush_dcomp_if_dirty(force=True)
+            self._dcomp.show(topmost=True)
 
     def _populate_control_buttons(self, parent_frame):
         """Cria os 7 botões de controle (👑/🎯 📊 🔄 ⏸ ⚡ 🔓 ✕) para clique 100% confiável."""
@@ -3377,9 +4115,9 @@ class OverlayDPSMeter:
         self._bind_bars_canvas_events(self.bg_bars_canvas)
         self.bg_rows = [self._make_bg_row(self.bg_bars_canvas, i) for i in range(max_rows)]
 
-        # 2. LAYER 2 (Frente - root): Textos, Números, Ícones e Botões (ou camada única quando performance_mode=True)
-        fg_frame_bg = "#16121a" if self.performance_mode else TRANSPARENT_KEY
-        fg_bars_bg  = "#121216" if self.performance_mode else TRANSPARENT_KEY
+        # 2. LAYER 2 (Frente - root): Textos, Números, Ícones e Botões para o Dual-Layer Clássico
+        fg_frame_bg = TRANSPARENT_KEY
+        fg_bars_bg  = TRANSPARENT_KEY
         self.monster_frame = tk.Frame(self.root, bg=fg_frame_bg, width=HUD_WIDTH, height=MONSTER_BAR_H)
         self.monster_frame.place(x=0, y=0, width=HUD_WIDTH, height=MONSTER_BAR_H)
         self.monster_frame.pack_propagate(False)
@@ -3391,7 +4129,7 @@ class OverlayDPSMeter:
         )
         mc.pack(fill=tk.BOTH, expand=True)
         self.monster_canvas = mc
-        self.m_fg_bg_img    = mc.create_image(0, 0, anchor="nw", state=("normal" if self.performance_mode else "hidden"))
+        self.m_fg_bg_img    = mc.create_image(0, 0, anchor="nw", state="hidden")
 
         self.m_name_txt   = mc.create_text(12, 13, text="Aguardando Alvo", anchor="w", fill="#ffffff", font=("Segoe UI", 9, "bold"))
         self.m_info_txt   = mc.create_text(HUD_WIDTH - 10, 13, text="", anchor="e", fill="#ffffff", font=("Segoe UI", 9, "bold"))
@@ -3488,15 +4226,74 @@ class OverlayDPSMeter:
     def _update_row(
         self, row, pill, img_obj, rank_str, rank_color, name_str, cp_str,
         dmg_str, dps_str, share_str, pad_offset=5, death_str="",
-        crit_str="", p_class="templar", is_dead=False, ratio=1.0, show_cp_icon=False
+        crit_str="", p_class="templar", is_dead=False, ratio=1.0, show_cp_icon=False,
+        is_local=False, icon_pil=None
     ):
-        """Atualiza barra no fundo (bg_win 60% opaco) e textos/ícones na frente (100% nítidos)."""
+        """Atualiza barra e textos/ícones no DirectComposition ou no Dual-Layer Tkinter Clássico."""
         idx = row.get("idx", 0)
+        if self._is_dcomp_active():
+            fonts = getattr(self, "_dcomp_fonts", None) or _DCompFontSet()
+            self._dcomp_fonts = fonts
+            name_w = fonts.measure_w("10b", name_str) if name_str else 0
+            name_end = (44 + name_w + pad_offset) if name_str else (46 + pad_offset)
+            cp_txt_x = name_end + (14 if (cp_str and show_cp_icon and getattr(self, "swords_pil", None) is not None) else 0)
+            cp_w = fonts.measure_w("8b", cp_str) if cp_str else 0
+            after_cp_x = (cp_txt_x + cp_w + 6) if cp_str else name_end
+            death_txt_x = after_cp_x + (16 if (death_str and getattr(self, "skull_pil", None) is not None) else 0)
+
+            row["_last_pill"]        = pill
+            row["_last_img"]         = img_obj if img_obj else ""
+            row["_last_rank"]        = rank_str
+            row["_last_rank_color"]  = rank_color
+            row["_last_name"]        = name_str
+            row["_last_name_end"]    = name_end
+            row["_last_cp"]          = cp_str
+            row["_last_cp_img_x"]    = name_end
+            row["_last_cp_x"]        = cp_txt_x
+            row["_last_after_cp_x"]  = after_cp_x
+            row["_last_death"]       = death_str
+            row["_last_death_img_x"] = after_cp_x
+            row["_last_death_x"]     = death_txt_x
+            row["_last_col1"]        = dmg_str
+            row["_last_col2"]        = dps_str
+            row["_last_col3"]        = crit_str
+            row["_last_col4"]        = share_str
+
+            sig = (
+                p_class, round(float(ratio), 3), bool(is_local), bool(is_dead),
+                rank_str, rank_color, id(icon_pil), name_str, cp_str, bool(show_cp_icon),
+                death_str, dmg_str, dps_str, crit_str, share_str
+            )
+            prev_rd = self._dcomp_rows[idx] if idx < len(self._dcomp_rows) else None
+            if not prev_rd or prev_rd.get("sig") != sig:
+                self._dcomp_rows[idx] = {
+                    "sig": sig,
+                    "p_class": p_class,
+                    "ratio": float(ratio),
+                    "is_local": bool(is_local),
+                    "is_dead": bool(is_dead),
+                    "rank": rank_str,
+                    "rank_color": rank_color,
+                    "icon_pil": icon_pil,
+                    "name": name_str,
+                    "cp": cp_str,
+                    "show_cp_icon": bool(show_cp_icon),
+                    "cp_img_x": name_end,
+                    "cp_x": cp_txt_x,
+                    "death": death_str,
+                    "death_img_x": after_cp_x,
+                    "death_x": death_txt_x,
+                    "col1": dmg_str,
+                    "col2": dps_str,
+                    "col3": crit_str,
+                    "col4": share_str,
+                }
+                self._dcomp_dirty = True
+            return
+
         if pill is not row["_last_pill"]:
-            if not getattr(self, "performance_mode", False) and hasattr(self, "bg_rows") and idx < len(self.bg_rows):
+            if hasattr(self, "bg_rows") and idx < len(self.bg_rows):
                 self.bg_rows[idx]["c"].itemconfig(self.bg_rows[idx]["pill"], image=pill)
-            elif row.get("pill"):
-                row["c"].itemconfig(row["pill"], image=pill, state="normal")
             row["_last_pill"] = pill
         c = row["c"]
 
@@ -3613,6 +4410,18 @@ class OverlayDPSMeter:
         count = max(1, min(len(self.rows), count))
         if count == self.visible_rows:
             return
+        self.visible_rows = count
+        new_h = (MONSTER_BAR_H + 4) + count * (PLAYER_BAR_H + 3)
+        self._cur_win_h = new_h
+
+        if self._is_dcomp_active():
+            for i in range(len(self.rows)):
+                self.rows[i]["packed"] = (i < count)
+            self._dcomp.resize(HUD_WIDTH, new_h)
+            self._dcomp_dirty = True
+            self._enforce_z_order()
+            return
+
         c = getattr(self, "bars_canvas", None)
         bg_c = getattr(self, "bg_bars_canvas", None)
         for i in range(len(self.rows)):
@@ -3628,20 +4437,15 @@ class OverlayDPSMeter:
                     bg_r["packed"] = want
                     if bg_c is not None and bg_r.get("tag"):
                         bg_c.itemconfigure(bg_r["tag"], state=("normal" if want else "hidden"))
-        self.visible_rows = count
-        new_h = (MONSTER_BAR_H + 4) + count * (PLAYER_BAR_H + 3)
-        self._cur_win_h = new_h
         self.root.geometry(f"{HUD_WIDTH}x{new_h}")
-        if not self.performance_mode and getattr(self, "bg_win", None):
+        if getattr(self, "bg_win", None):
             self.bg_win.geometry(f"{HUD_WIDTH}x{new_h}")
         try:
             self.root.update_idletasks()
-            if not self.performance_mode and getattr(self, "bg_win", None):
+            if getattr(self, "bg_win", None):
                 self.bg_win.update_idletasks()
         except Exception:
             pass
-        if self.performance_mode:
-            self._update_window_region(count)
         self._enforce_z_order()
 
     def _get_fight_duration(self):
@@ -3662,6 +4466,8 @@ class OverlayDPSMeter:
                 b.configure(text="▶", fg="#22c55e")
             else:
                 b.configure(text="⏸", fg="#cbd5e1")
+        self._dcomp_dirty = True
+        self._flush_dcomp_if_dirty()
 
     def toggle_mode(self):
         if self.view_mode == "SOLO":
@@ -3682,6 +4488,7 @@ class OverlayDPSMeter:
                 self.render_skills(dur)
         else:
             self.show_standby_local_player()
+        self._flush_dcomp_if_dirty()
 
     def reset_metrics(self):
         flush_config_to_disk(force=True)
@@ -3746,22 +4553,26 @@ class OverlayDPSMeter:
         self._update_target_label(is_dead=False, dur=0.0)
 
         row = self.rows[0]
+        use_dcomp = self._is_dcomp_active()
         if not self.player_identified:
-            pill = self.pill_renderer.get_player_pill("skill", 1.0, is_local=False)
+            pill = None if use_dcomp else self.pill_renderer.get_player_pill("skill", 1.0, is_local=False)
             self._update_row(
                 row, pill, None,
                 "-", "#cbd5e1",
                 "Aguardando identificar jogador", "",
                 "", "", "", death_str="", crit_str="",
-                p_class="skill", is_dead=False, ratio=1.0, show_cp_icon=False
+                p_class="skill", is_dead=False, ratio=1.0, show_cp_icon=False,
+                is_local=False, icon_pil=None
             )
+            self._flush_dcomp_if_dirty()
             return
 
-        p_class = self.local_class or "templar"
-        pill    = self.pill_renderer.get_player_pill(p_class, 1.0, is_local=True)
-        c_icon  = self.class_icons.get((p_class, False)) or self.class_icons.get(p_class)
-        cp_val  = self.local_combat_power
-        cp_str  = f"{cp_val/1000:.1f}K" if cp_val >= 1000 else (f"{cp_val}" if cp_val > 0 else "")
+        p_class  = self.local_class or "templar"
+        pill     = None if use_dcomp else self.pill_renderer.get_player_pill(p_class, 1.0, is_local=True)
+        c_icon   = None if use_dcomp else (self.class_icons.get((p_class, False)) or self.class_icons.get(p_class))
+        c_pil    = self.class_pils.get((p_class, False)) or self.class_pils.get(p_class)
+        cp_val   = self.local_combat_power
+        cp_str   = f"{cp_val/1000:.1f}K" if cp_val >= 1000 else (f"{cp_val}" if cp_val > 0 else "")
 
         self._update_row(
             row, pill, c_icon,
@@ -3769,8 +4580,10 @@ class OverlayDPSMeter:
             self.local_player_name, cp_str,
             "0", "0/s", "0.0%", death_str="",
             crit_str="0% (0)",
-            p_class=p_class, is_dead=False, ratio=1.0, show_cp_icon=bool(cp_str)
+            p_class=p_class, is_dead=False, ratio=1.0, show_cp_icon=bool(cp_str),
+            is_local=True, icon_pil=c_pil
         )
+        self._flush_dcomp_if_dirty()
 
     def _compute_berserk_epoch(self, berserk_ms):
         if not berserk_ms or berserk_ms <= 0:
@@ -5102,6 +5915,8 @@ class OverlayDPSMeter:
                         self.render_skills(dur)
                 else:
                     self._update_target_label(is_dead=self.target_is_dead, dur=0.0)
+                if hasattr(self, "_flush_dcomp_if_dirty"):
+                    self._flush_dcomp_if_dirty()
             else:
                 # Atualiza apenas o relógio de Enrage (1x por segundo) caso o Boss tenha Enrage ativo e esteja vivo
                 if self.in_combat and not self.target_is_dead and not self.combat_frozen and self.active_target_berserk_epoch is not None:
@@ -5109,10 +5924,14 @@ class OverlayDPSMeter:
                     if cur_sec != self._last_enrage_sec:
                         self._last_enrage_sec = cur_sec
                         self._update_target_label(is_dead=False, dur=self._get_fight_duration())
+                        if hasattr(self, "_flush_dcomp_if_dirty"):
+                            self._flush_dcomp_if_dirty()
                 # Se estiver na aba SKILLS e um ícone terminou o download em background, carrega na Main Thread
                 if self.view_mode == "SKILLS" and self._has_pending_skill_icons and not ICON_MGR.downloading:
                     if self.in_combat and self.combat_start:
                         self.render_skills(self._get_fight_duration())
+                        if hasattr(self, "_flush_dcomp_if_dirty"):
+                            self._flush_dcomp_if_dirty()
 
     def _update_target_label(self, is_dead=False, dur=None):
         total_dmg = sum(p["damage"] for p in self.players_combat.values())
@@ -5169,6 +5988,96 @@ class OverlayDPSMeter:
                 ratio = 0.36  # Pílula vermelha sob o nome quando HP máximo não informado
 
         # Formata informações da direita: %HP · DPS da PT · 💀 Time to Death · Tempo de luta (ou Enrage)
+        use_dcomp = self._is_dcomp_active() if hasattr(self, "_is_dcomp_active") else False
+        if use_dcomp:
+            fonts = getattr(self, "_dcomp_fonts", None) or _DCompFontSet()
+            self._dcomp_fonts = fonts
+            if is_dead:
+                parts = [f"{pct}%"]
+                if pt_dps_str:
+                    parts.append(pt_dps_str)
+                parts.append(time_str)
+                right_str = " · ".join(parts)
+                r_fill = "#ffffff"
+                ttd_str = ""
+                left_str = ""
+                r_x = HUD_WIDTH - 10 - max(28, fonts.measure_w("9b", right_str))
+                ttd_x = r_x - 3
+                left_x = ttd_x - 2
+                left_boundary = r_x
+            else:
+                if not self.combat_frozen and self.active_target_berserk_epoch is not None:
+                    enrage_rem = int(math.ceil(self.active_target_berserk_epoch - now))
+                    if enrage_rem <= 0:
+                        right_str = "🔥ENRAGED"
+                        r_fill = "#f87171"
+                    else:
+                        em, es = divmod(enrage_rem, 60)
+                        if ttk_sec is not None and ttk_sec >= enrage_rem:
+                            right_str = f"⚠️🔥{em}:{es:02d}"
+                            r_fill = "#fb923c"
+                        else:
+                            right_str = f"🔥{em}:{es:02d}"
+                            r_fill = "#4ade80" if ttk_sec is not None else "#f1f5f9"
+                else:
+                    right_str = time_str
+                    r_fill = "#cbd5e1"
+                r_x = HUD_WIDTH - 10 - max(24, fonts.measure_w("9b", right_str))
+
+                if ttk_sec is not None and ttk_sec > 0 and not self.combat_frozen:
+                    tm, ts = divmod(ttk_sec, 60)
+                    ttd_str = f"· 💀 {tm}:{ts:02d} ·"
+                    ttd_x = r_x - 3
+                    after_ttd_x = ttd_x - fonts.measure_w("9b", ttd_str)
+                else:
+                    ttd_str = ""
+                    ttd_x = r_x - 3
+                    after_ttd_x = r_x - 3
+
+                if self.in_combat or pt_dps_str:
+                    left_str = f"{pct}% · {pt_dps_str}" if pt_dps_str else f"{pct}% ·"
+                else:
+                    left_str = f"{pct}% ·" if right_str else ""
+                left_x = after_ttd_x - 2
+                left_boundary = left_x - (fonts.measure_w("9b", left_str) if left_str else 0)
+
+            t_name = self.active_target_name if self.active_target_name != "Nenhum alvo" else "Aguardando Alvo"
+            if self.view_mode == "SKILLS":
+                t_name = f"📊 Skills • {t_name}"
+            if self.is_click_through:
+                t_name = f"🔒F8 • {t_name}"
+            avail_w = max(40, left_boundary - 20)
+            disp_name = t_name
+            while len(disp_name) > 4 and fonts.measure_w("9b", disp_name) > avail_w:
+                disp_name = disp_name[:-2] + "…"
+
+            self._m_last_info     = right_str
+            self._m_last_color    = r_fill
+            self._m_last_ttd      = ttd_str
+            self._m_last_left     = left_str
+            self._m_last_raw_name = t_name
+            self._m_last_avail_w  = avail_w
+            self._m_last_name     = disp_name
+
+            m_ratio = float(ratio if not is_dead else 0.0)
+            sig = (round(m_ratio, 3), disp_name, right_str, r_fill, int(r_x), ttd_str, int(ttd_x), left_str, int(left_x))
+            prev_ms = getattr(self, "_dcomp_monster", None)
+            if not prev_ms or prev_ms.get("sig") != sig:
+                self._dcomp_monster = {
+                    "sig": sig,
+                    "ratio": m_ratio,
+                    "name": disp_name,
+                    "right_str": right_str,
+                    "right_color": r_fill,
+                    "right_x": int(r_x),
+                    "ttd_str": ttd_str,
+                    "ttd_x": int(ttd_x),
+                    "left_str": left_str,
+                    "left_x": int(left_x),
+                }
+                self._dcomp_dirty = True
+            return
+
         left_boundary = HUD_WIDTH - 10
         if is_dead:
             # Boss morto: oculta TTD e exibe resumo oficial: "%HP · DPS da PT · Duração final da kill"
@@ -5282,12 +6191,9 @@ class OverlayDPSMeter:
                     self.monster_canvas.itemconfig(self.m_name_txt, text=disp_name)
             self._m_last_name = disp_name
 
-        perf_mode = bool(getattr(self, "performance_mode", False))
-        m_pill = self.pill_renderer.get_monster_pill(ratio if not is_dead else 0.0, solid_bg=perf_mode)
+        m_pill = self.pill_renderer.get_monster_pill(ratio if not is_dead else 0.0, solid_bg=False)
         if m_pill is not self._m_last_pill:
-            if perf_mode and hasattr(self, "m_fg_bg_img"):
-                self.monster_canvas.itemconfig(self.m_fg_bg_img, image=m_pill, state="normal")
-            elif getattr(self, "bg_monster_canvas", None) is not None and hasattr(self, "m_bg_img"):
+            if getattr(self, "bg_monster_canvas", None) is not None and hasattr(self, "m_bg_img"):
                 self.bg_monster_canvas.itemconfig(self.m_bg_img, image=m_pill)
             elif hasattr(self, "m_bg_img"):
                 self.monster_canvas.itemconfig(self.m_bg_img, image=m_pill)
@@ -5311,9 +6217,8 @@ class OverlayDPSMeter:
 
         top_dmg         = sorted_players[0]["damage"] or 1
         total_party_dmg = sum(p["damage"] for p in sorted_players) or 1
-
-        # Base de cálculo da porcentagem (%) idêntica ao Questlog (combat.cjs share: Ue(n.damage, t.damage)):
-        share_basis = total_party_dmg
+        share_basis     = total_party_dmg
+        use_dcomp       = self._is_dcomp_active() if hasattr(self, "_is_dcomp_active") else False
 
         for i in range(num_bars):
             row     = self.rows[i]
@@ -5327,8 +6232,9 @@ class OverlayDPSMeter:
             p_class = p.get("class", "templar")
             ratio   = max(0.0, min(1.0, dmg / top_dmg))
 
-            pill   = self.pill_renderer.get_player_pill(p_class, ratio, is_local=p["is_local"], is_dead=is_dead)
-            c_icon = self.class_icons.get((p_class, is_dead)) or self.class_icons.get(p_class)
+            pill   = None if use_dcomp else self.pill_renderer.get_player_pill(p_class, ratio, is_local=p["is_local"], is_dead=is_dead)
+            c_icon = None if use_dcomp else (self.class_icons.get((p_class, is_dead)) or self.class_icons.get(p_class))
+            c_pil  = self.class_pils.get((p_class, is_dead)) or self.class_pils.get(p_class) if hasattr(self, "class_pils") else None
 
             display_name = p["name"]
             max_n_len = 10 if deaths > 0 else 11
@@ -5344,8 +6250,6 @@ class OverlayDPSMeter:
             cp_str    = f"{cp_val/1000:.1f}K" if cp_val >= 1000 else (f"{cp_val}" if cp_val > 0 else "")
             death_str = str(deaths) if deaths > 0 else ""
 
-            # Formatação de Métricas:
-            # 1. Dano Total em Milhões / k (ex: 614.5k, 30.21M, 12.47M)
             if dmg >= 1_000_000:
                 dmg_str = f"{dmg/1_000_000:.2f}M"
             elif dmg >= 1_000:
@@ -5353,20 +6257,17 @@ class OverlayDPSMeter:
             else:
                 dmg_str = f"{dmg:,.0f}"
 
-            # 2. DPS suave (ex: 7.7k/s, 90.6k/s)
             if dps >= 1000:
                 dps_str = f"{dps/1000:.1f}k/s"
             else:
                 dps_str = f"{dps:,.0f}/s"
 
-            # 3. Crit % e Crit Hit (Idêntico ao Questlog combat.cjs: hits diretos e crits diretos, sem diluição por DoT)
             p_hits  = p.get("hits", 0)
             p_crits = p.get("crits", 0)
             crit_pct = (p_crits / p_hits * 100.0) if p_hits > 0 else 0.0
             crits_fmt = f"{p_crits/1000:.1f}k" if p_crits >= 1000 else str(p_crits)
             crit_str = f"{crit_pct:.0f}% ({crits_fmt})"
 
-            # 4. Share % (ex: 26.4%)
             share_str = f"{share:.1f}%"
 
             rank_str = str(i + 1)
@@ -5383,8 +6284,12 @@ class OverlayDPSMeter:
                 p_class=p_class,
                 is_dead=is_dead,
                 ratio=ratio,
-                show_cp_icon=bool(cp_str)
+                show_cp_icon=bool(cp_str),
+                is_local=bool(p.get("is_local", False)),
+                icon_pil=c_pil
             )
+        if use_dcomp and hasattr(self, "_flush_dcomp_if_dirty"):
+            self._flush_dcomp_if_dirty()
 
     def render_skills(self, dur):
         local_p = self.players_combat.get("LOCAL")
@@ -5405,6 +6310,7 @@ class OverlayDPSMeter:
         max_dmg     = sorted_skills[0]["damage"] or 1
         total_local = local_p["damage"] or 1
         pending_icons = False
+        use_dcomp   = self._is_dcomp_active() if hasattr(self, "_is_dcomp_active") else False
 
         for i in range(num_bars):
             row    = self.rows[i]
@@ -5420,13 +6326,20 @@ class OverlayDPSMeter:
             total_sk_hits = sk_hits + sk.get("overTimeHits", 0)
             ratio  = max(0.0, min(1.0, dmg / max_dmg))
 
-            pill = self.pill_renderer.get_player_pill("skill", ratio, is_local=False)
+            pill = None if use_dcomp else self.pill_renderer.get_player_pill("skill", ratio, is_local=False)
 
             sk_name  = sk["name"]
             sk_icon  = sk.get("icon")
-            icon_img = ICON_MGR.get_skill_icon(sk_icon) if sk_icon else None
-            if sk_icon and icon_img is None and sk_icon in ICON_MGR.downloading:
-                pending_icons = True
+            if use_dcomp:
+                icon_img = None
+                icon_pil = ICON_MGR.get_skill_icon_pil(sk_icon) if sk_icon else None
+                if sk_icon and icon_pil is None and sk_icon in ICON_MGR.downloading:
+                    pending_icons = True
+            else:
+                icon_pil = ICON_MGR.get_skill_icon_pil(sk_icon) if sk_icon else None
+                icon_img = ICON_MGR.get_skill_icon(sk_icon) if sk_icon else None
+                if sk_icon and icon_img is None and sk_icon in ICON_MGR.downloading:
+                    pending_icons = True
 
             if len(sk_name) > 13:
                 sk_name = sk_name[:12] + "…"
@@ -5457,14 +6370,20 @@ class OverlayDPSMeter:
                 p_class="skill",
                 is_dead=False,
                 ratio=ratio,
-                show_cp_icon=False
+                show_cp_icon=False,
+                is_local=False,
+                icon_pil=icon_pil
             )
 
         self._has_pending_skill_icons = pending_icons
+        if use_dcomp and hasattr(self, "_flush_dcomp_if_dirty"):
+            self._flush_dcomp_if_dirty()
 
     def on_close(self):
         flush_config_to_disk(force=True)
         self.sniffer.stop()
+        if hasattr(self, "_destroy_dcomp_surface"):
+            self._destroy_dcomp_surface()
         if hasattr(self, "bg_win") and self.bg_win:
             try:
                 self.bg_win.destroy()
@@ -5480,15 +6399,18 @@ class OverlayDPSMeter:
             pass
         sys.exit(0)
 
-def main():
+def parse_cli_args(argv=None):
     import argparse
-    check_or_request_admin()
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--performance", "--no-gpu-composite", "--no-transparent", action="store_true", dest="performance_mode")
-    parser.add_argument("--transparent", action="store_false", dest="performance_mode")
+    parser.add_argument("--dcomp", "--performance", action="store_true", dest="performance_mode")
+    parser.add_argument("--legacy-tk", "--no-gpu-composite", "--no-transparent", "--transparent", action="store_false", dest="performance_mode")
     parser.add_argument("--ui-ms", type=int, default=None, dest="ui_refresh_ms")
     parser.set_defaults(performance_mode=None)
-    args, _ = parser.parse_known_args()
+    return parser.parse_known_args(argv)
+
+def main():
+    check_or_request_admin()
+    args, _ = parse_cli_args()
 
     root = tk.Tk()
     OverlayDPSMeter(root, performance_mode=args.performance_mode, ui_refresh_ms=args.ui_refresh_ms)
