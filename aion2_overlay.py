@@ -2363,18 +2363,27 @@ class PillRenderer:
         if raw_w >= HUD_WIDTH: return HUD_WIDTH
         return (raw_w // 2) * 2
 
-    def get_monster_pill(self, ratio):
-        # Exibe APENAS a pílula vermelha sob o nome do boss proporcional ao HP,
-        # mantendo todo o restante do topo 100% transparente via colorkey
+    def get_monster_pill(self, ratio, solid_bg=False):
+        # Exibe a pílula vermelha sob o nome do boss proporcional ao HP.
+        # Quando solid_bg=True (Modo Performance sem LWA_COLORKEY), preenche cápsula escura arredondada no fundo todo.
         calc_w = int(HUD_WIDTH * ratio)
         min_w = 120
         bar_w = max(min_w, min(HUD_WIDTH - 75, calc_w))
         bar_w = self._quantize_w(bar_w)
-        if bar_w in self.monster_cache:
-            self.monster_cache.move_to_end(bar_w)
-            return self.monster_cache[bar_w]
+        cache_key = (bar_w, bool(solid_bg))
+        if cache_key in self.monster_cache:
+            self.monster_cache.move_to_end(cache_key)
+            return self.monster_cache[cache_key]
 
-        out = Image.new("RGBA", (HUD_WIDTH, MONSTER_BAR_H), TRANSPARENT_RGB)
+        if solid_bg:
+            out = Image.new("RGBA", (HUD_WIDTH, MONSTER_BAR_H), (22, 18, 26, 255))
+            d_bg = ImageDraw.Draw(out)
+            d_bg.rounded_rectangle(
+                [0, 0, HUD_WIDTH - 1, MONSTER_BAR_H - 1],
+                radius=6, outline=(56, 50, 66, 255), width=1
+            )
+        else:
+            out = Image.new("RGBA", (HUD_WIDTH, MONSTER_BAR_H), TRANSPARENT_RGB)
         if bar_w > 4:
             pill_img = Image.new("RGBA", (bar_w, MONSTER_BAR_H), (0, 0, 0, 0))
             grad_crop = self.m_full_grad.crop((0, 0, bar_w, MONSTER_BAR_H))
@@ -2391,8 +2400,8 @@ class PillRenderer:
             out.paste(pill_img, (0, 0), pill_mask)
 
         photo = ImageTk.PhotoImage(out)
-        self.monster_cache[bar_w] = photo
-        if len(self.monster_cache) > 96:
+        self.monster_cache[cache_key] = photo
+        if len(self.monster_cache) > 128:
             self.monster_cache.popitem(last=False)
         return photo
 
@@ -2492,13 +2501,26 @@ class PillRenderer:
 # INTERFACE GRÁFICA OVERLAY DPS METER (FLUTUANTE)
 # ─────────────────────────────────────────────
 class OverlayDPSMeter:
-    boss_only          = True
-    current_map_key    = 0
-    is_loading         = False
-    loading_started_at = 0.0
-    last_map_reset_t   = 0.0
+    boss_only                = True
+    performance_mode         = False
+    ui_refresh_ms            = 160
+    _ui_dirty                = False
+    _last_ui_paint_t         = 0.0
+    _last_rgn_sig            = None
+    active_target_key        = None
+    current_map_id           = None
+    player_identified        = False
+    in_combat                = False
+    combat_frozen            = False
+    target_is_dead           = False
+    _last_enrage_sec         = -1
+    _has_pending_skill_icons = False
+    current_map_key          = 0
+    is_loading               = False
+    loading_started_at       = 0.0
+    last_map_reset_t         = 0.0
 
-    def __init__(self, root):
+    def __init__(self, root, performance_mode=None, ui_refresh_ms=None):
         # 1. Janela Principal Nativa (1x1 Offscreen) -> Garante ícone 100% nativo na Barra de Tarefas do Windows 11
         #    com suporte a "Fechar janela" pelo botão direito na Barra de Tarefas, sem qualquer piscada (flicker)!
         self.taskbar_win = root
@@ -2517,9 +2539,18 @@ class OverlayDPSMeter:
         self.taskbar_win.bind("<Unmap>", self._on_taskbar_unmap)
         self.taskbar_win.bind("<Map>", self._on_taskbar_map)
 
-        # 2. Sistema Dual-Layer com Transparência Anterior:
-        #    Fundo translúcido (60% opacidade em bg_win + colorkey) + Frente 100% opaca (textos/ícones nítidos + colorkey),
-        #    mantendo ambos em canvas plano único para zero bugs de sub-janelas!
+        cfg = load_config()
+        self.performance_mode = bool(cfg.get("performance_mode", False) if performance_mode is None else performance_mode)
+        raw_ui_ms = cfg.get("ui_refresh_ms", 160) if ui_refresh_ms is None else ui_refresh_ms
+        try:
+            self.ui_refresh_ms = max(100, min(250, int(raw_ui_ms)))
+        except Exception:
+            self.ui_refresh_ms = 160
+        self._ui_dirty        = False
+        self._last_ui_paint_t = 0.0
+        self._last_rgn_sig    = None
+
+        # 2. Sistema Dual-Layer Transparente (padrão) vs Single-HWND Performance Mode (MPO-Safe / sem LWA_COLORKEY):
         self.bar_opacity = 0.60
 
         self.bg_win = tk.Toplevel(self.taskbar_win)
@@ -2533,17 +2564,23 @@ class OverlayDPSMeter:
             self.bg_win.attributes("-alpha", self.bar_opacity)
         except Exception:
             pass
+        if self.performance_mode:
+            try:
+                self.bg_win.withdraw()
+            except Exception:
+                pass
 
         self.root = tk.Toplevel(self.taskbar_win)
         self.root.title("Aion 2 Weed Metter")
         self.root.overrideredirect(True)
         self.root.geometry(f"{HUD_WIDTH}x68+80+80")
         self.root.attributes("-topmost", True)
-        self.root.configure(bg=TRANSPARENT_KEY)
-        try:
-            self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
-        except Exception:
-            pass
+        self.root.configure(bg="#16121a" if self.performance_mode else TRANSPARENT_KEY)
+        if not self.performance_mode:
+            try:
+                self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
+            except Exception:
+                pass
 
         self._cur_win_x = 80
         self._cur_win_y = 80
@@ -2623,6 +2660,7 @@ class OverlayDPSMeter:
         self.btns_boss  = []
         self.btns_mode  = []
         self.btns_pause = []
+        self.btns_perf  = []
         self.btns_lock  = []
 
         self.pill_renderer = PillRenderer()
@@ -2659,7 +2697,7 @@ class OverlayDPSMeter:
     def _on_taskbar_map(self, event=None):
         if event is None or event.widget == self.taskbar_win:
             try:
-                if hasattr(self, "bg_win") and self.bg_win:
+                if not self.performance_mode and hasattr(self, "bg_win") and self.bg_win:
                     self.bg_win.deiconify()
                     self.bg_win.attributes("-topmost", True)
                 self.root.deiconify()
@@ -2683,26 +2721,52 @@ class OverlayDPSMeter:
         return self._get_win_hwnd(self.root)
 
     def _enforce_z_order(self):
-        """Garante que self.root (textos/botões) fique SEMPRE estritamente acima de self.bg_win (fundo 60%)."""
+        """Garante self.root no topo e, fora do Modo Performance, mantém self.bg_win logo abaixo."""
         if sys.platform != "win32":
             return
         try:
             flags = 0x0001 | 0x0002 | 0x0010  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
             h_fg = self._get_win_hwnd(self.root)
-            h_bg = self._get_win_hwnd(self.bg_win) if getattr(self, "bg_win", None) else 0
             if h_fg:
                 _win32_user.SetWindowPos(h_fg, wintypes.HWND(-1), 0, 0, 0, 0, flags)
-            if h_bg and h_fg:
-                _win32_user.SetWindowPos(h_bg, h_fg, 0, 0, 0, 0, flags)
+            if not self.performance_mode:
+                h_bg = self._get_win_hwnd(self.bg_win) if getattr(self, "bg_win", None) else 0
+                if h_bg and h_fg:
+                    _win32_user.SetWindowPos(h_bg, h_fg, 0, 0, 0, 0, flags)
         except Exception:
             pass
 
-    def _update_window_region(self, count=None):
-        """Com colorkey ativo (-transparentcolor), o recorte de SetWindowRgn não é usado para manter o topo transparente."""
-        return
+    def _update_window_region(self, count=None, force=False):
+        """No Modo Performance, recorta self.root via HRGN nas barras arredondadas para eliminar WS_EX_LAYERED / LWA_COLORKEY."""
+        if sys.platform != "win32" or not self.performance_mode:
+            return
+        try:
+            hwnd = self._get_win_hwnd(self.root)
+            if not hwnd:
+                return
+            cnt = max(1, count or getattr(self, "visible_rows", 1) or 1)
+            sig = (cnt, True)
+            if not force and sig == getattr(self, "_last_rgn_sig", None):
+                return
+            rgn_total = _win32_gdi.CreateRoundRectRgn(0, 0, HUD_WIDTH + 1, MONSTER_BAR_H + 1, 12, 12)
+            if not rgn_total:
+                return
+            for i in range(cnt):
+                y0 = (MONSTER_BAR_H + 4) + i * (PLAYER_BAR_H + 3)
+                y1 = y0 + PLAYER_BAR_H + 1
+                rgn_row = _win32_gdi.CreateRoundRectRgn(0, y0, HUD_WIDTH + 1, y1, 12, 12)
+                if rgn_row:
+                    _win32_gdi.CombineRgn(rgn_total, rgn_total, rgn_row, 2)  # RGN_OR = 2
+                    _win32_gdi.DeleteObject(rgn_row)
+            if _win32_user.SetWindowRgn(hwnd, rgn_total, True):
+                self._last_rgn_sig = sig
+            else:
+                _win32_gdi.DeleteObject(rgn_total)
+        except Exception:
+            pass
 
     def _apply_win32_overlay_styles(self):
-        """Configura atributos nativos Win32/DWM no sistema dual-layer com transparência (LWA_COLORKEY + alpha 60% no fundo)."""
+        """Configura atributos nativos Win32/DWM (Dual-Layer Transparente ou Single-HWND Performance Mode sem LWA_COLORKEY)."""
         if sys.platform != "win32":
             return
         try:
@@ -2715,12 +2779,48 @@ class OverlayDPSMeter:
             r_k, g_k, b_k = TRANSPARENT_RGB[0], TRANSPARENT_RGB[1], TRANSPARENT_RGB[2]
             cr_key = (b_k << 16) | (g_k << 8) | r_k
             val_one = ctypes.c_int(1)
+            val_none = ctypes.c_uint(0xFFFFFFFE)  # DWMWA_COLOR_NONE
+
+            def _apply_dwm_attrs(hwnd):
+                for attr in (2, 3, 12, 33, 38):
+                    try:
+                        _win32_dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val_one), 4)
+                    except Exception:
+                        pass
+                try:
+                    _win32_dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(val_none), 4)
+                except Exception:
+                    pass
+
+            if self.performance_mode:
+                if getattr(self, "bg_win", None):
+                    try:
+                        self.bg_win.withdraw()
+                    except Exception:
+                        pass
+                hwnd_fg = self._get_win_hwnd(self.root)
+                if hwnd_fg:
+                    _apply_dwm_attrs(hwnd_fg)
+                    ex_style = _get_win_long(hwnd_fg, GWL_EXSTYLE)
+                    ex_style |= (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
+                    if self._win32_transparent_applied:
+                        # Cross-process click-through exige WS_EX_LAYERED, porém usa LWA_ALPHA=255 (ZERO chroma-key!)
+                        ex_style |= (WS_EX_LAYERED | WS_EX_TRANSPARENT)
+                    else:
+                        # Destravado: remove completamente WS_EX_LAYERED e LWA_COLORKEY para preservar Direct Flip / MPO!
+                        ex_style &= ~(WS_EX_LAYERED | WS_EX_TRANSPARENT)
+                    _set_win_long(hwnd_fg, GWL_EXSTYLE, ex_style)
+                    _win32_user.SetWindowPos(hwnd_fg, None, 0, 0, 0, 0, 0x0037)
+                    if self._win32_transparent_applied:
+                        _win32_user.SetLayeredWindowAttributes(hwnd_fg, 0, 255, 2)  # LWA_ALPHA sólido
+                self._update_window_region(self.visible_rows or 1, force=True)
+                self._enforce_z_order()
+                return
 
             def _setup_hwnd(hwnd, is_bg):
                 if not hwnd:
                     return
-                for attr in (2, 3, 12, 33):
-                    _win32_dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val_one), 4)
+                _apply_dwm_attrs(hwnd)
                 ex_style = _get_win_long(hwnd, GWL_EXSTYLE)
                 ex_style |= (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED)
                 if self._win32_transparent_applied:
@@ -2736,7 +2836,11 @@ class OverlayDPSMeter:
                 else:
                     _win32_user.SetLayeredWindowAttributes(hwnd, cr_key, 0, 1)        # LWA_COLORKEY puro
 
-            _setup_hwnd(self._get_win_hwnd(self.root), is_bg=False)
+            hwnd_fg = self._get_win_hwnd(self.root)
+            if hwnd_fg:
+                _win32_user.SetWindowRgn(hwnd_fg, 0, True)
+                self._last_rgn_sig = None
+            _setup_hwnd(hwnd_fg, is_bg=False)
             if getattr(self, "bg_win", None):
                 _setup_hwnd(self._get_win_hwnd(self.bg_win), is_bg=True)
             self._enforce_z_order()
@@ -2744,13 +2848,29 @@ class OverlayDPSMeter:
             pass
 
     def _set_win32_transparent(self, transparent):
-        """Ativa/desativa WS_EX_TRANSPARENT em ambas as camadas mantendo LWA_COLORKEY/alpha intactos."""
+        """Ativa/desativa click-through respeitando Dual-Layer vs Modo Performance (MPO-Safe)."""
         if sys.platform != "win32" or transparent == self._win32_transparent_applied:
             return
         self._win32_transparent_applied = transparent
         try:
             GWL_EXSTYLE       = -20
             WS_EX_TRANSPARENT = 0x00000020
+            WS_EX_LAYERED     = 0x00080000
+            if self.performance_mode:
+                hwnd = self._get_win_hwnd(self.root)
+                if hwnd:
+                    ex_style = _get_win_long(hwnd, GWL_EXSTYLE)
+                    if transparent:
+                        ex_style |= (WS_EX_LAYERED | WS_EX_TRANSPARENT)
+                    else:
+                        ex_style &= ~(WS_EX_LAYERED | WS_EX_TRANSPARENT)
+                    _set_win_long(hwnd, GWL_EXSTYLE, ex_style)
+                    _win32_user.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0037)
+                    if transparent:
+                        _win32_user.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
+                    self._update_window_region(self.visible_rows or 1, force=True)
+                return
+
             for win in (self.root, getattr(self, "bg_win", None)):
                 hwnd = self._get_win_hwnd(win)
                 if hwnd:
@@ -2767,10 +2887,10 @@ class OverlayDPSMeter:
     def _show_hover_controls(self, show):
         if show and not self.is_hovered:
             self.is_hovered = True
-            self.hover_frame.place(x=HUD_WIDTH - 144, y=2, width=140, height=22)
+            self.hover_frame.place(x=HUD_WIDTH - 168, y=2, width=164, height=22)
             self.hover_frame.lift()
-            if getattr(self, "bg_hover_frame", None):
-                self.bg_hover_frame.place(x=HUD_WIDTH - 144, y=2, width=140, height=22)
+            if not self.performance_mode and getattr(self, "bg_hover_frame", None):
+                self.bg_hover_frame.place(x=HUD_WIDTH - 168, y=2, width=164, height=22)
                 self.bg_hover_frame.lift()
             self.monster_canvas.itemconfigure(self.m_info_txt, state="hidden")
             if hasattr(self, "m_ttd_txt"):
@@ -2893,17 +3013,18 @@ class OverlayDPSMeter:
         self._cur_win_x = x
         self._cur_win_y = y
         self.root.geometry(f"+{x}+{y}")
-        if getattr(self, "bg_win", None):
+        if not self.performance_mode and getattr(self, "bg_win", None):
             self.bg_win.geometry(f"+{x}+{y}")
         if sys.platform == "win32":
             try:
                 flags = 0x0001 | 0x0010  # SWP_NOSIZE | SWP_NOACTIVATE
                 h_fg = self._get_win_hwnd(self.root)
-                h_bg = self._get_win_hwnd(self.bg_win) if getattr(self, "bg_win", None) else 0
                 if h_fg:
                     _win32_user.SetWindowPos(h_fg, wintypes.HWND(-1), x, y, 0, 0, flags)
-                if h_bg and h_fg:
-                    _win32_user.SetWindowPos(h_bg, h_fg, x, y, 0, 0, flags)
+                if not self.performance_mode:
+                    h_bg = self._get_win_hwnd(self.bg_win) if getattr(self, "bg_win", None) else 0
+                    if h_bg and h_fg:
+                        _win32_user.SetWindowPos(h_bg, h_fg, x, y, 0, 0, flags)
             except Exception:
                 pass
 
@@ -3072,8 +3193,80 @@ class OverlayDPSMeter:
         if self.boss_only and not self.encounter_has_boss and not self.active_boss_key:
             self.reset_metrics()
 
+    def toggle_performance_mode(self):
+        """Alterna entre Dual-Layer Transparente e Modo Performance (Single-HWND + SetWindowRgn sem LWA_COLORKEY)."""
+        self.performance_mode = not self.performance_mode
+        cfg = load_config()
+        cfg["performance_mode"] = self.performance_mode
+        save_config(cfg)
+
+        perf_color = "#22c55e" if self.performance_mode else "#cbd5e1"
+        for b in getattr(self, "btns_perf", ()):
+            try:
+                b.configure(fg=perf_color)
+            except Exception:
+                pass
+
+        self._m_last_pill = None
+        for r in getattr(self, "rows", ()):
+            r["_last_pill"] = None
+
+        if self.performance_mode:
+            if hasattr(self, "monster_canvas"):
+                self.monster_canvas.configure(bg="#16121a")
+            if hasattr(self, "bars_canvas"):
+                self.bars_canvas.configure(bg="#121216")
+            if hasattr(self, "m_fg_bg_img"):
+                self.monster_canvas.itemconfigure(self.m_fg_bg_img, state="normal")
+            if getattr(self, "bg_win", None):
+                try:
+                    self.bg_win.withdraw()
+                except Exception:
+                    pass
+            try:
+                self.root.configure(bg="#16121a")
+                self.root.attributes("-transparentcolor", "")
+            except Exception:
+                pass
+        else:
+            if hasattr(self, "monster_canvas"):
+                self.monster_canvas.configure(bg=TRANSPARENT_KEY)
+            if hasattr(self, "bars_canvas"):
+                self.bars_canvas.configure(bg=TRANSPARENT_KEY)
+            if hasattr(self, "m_fg_bg_img"):
+                self.monster_canvas.itemconfigure(self.m_fg_bg_img, image="", state="hidden")
+            for r in getattr(self, "rows", ()):
+                if r.get("pill"):
+                    try:
+                        r["c"].itemconfigure(r["pill"], image="", state="hidden")
+                    except Exception:
+                        pass
+            try:
+                self.root.configure(bg=TRANSPARENT_KEY)
+                self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
+            except Exception:
+                pass
+            if getattr(self, "bg_win", None):
+                try:
+                    self.bg_win.deiconify()
+                    self.bg_win.attributes("-topmost", True)
+                except Exception:
+                    pass
+
+        self._apply_win32_overlay_styles()
+        self._enforce_z_order()
+        if self.in_combat and self.combat_start:
+            dur = self._get_fight_duration()
+            self._update_target_label(is_dead=self.target_is_dead, dur=dur)
+            if self.view_mode == "SOLO":
+                self.render_hud(dur)
+            else:
+                self.render_skills(dur)
+        else:
+            self.show_standby_local_player()
+
     def _populate_control_buttons(self, parent_frame):
-        """Cria os 6 botões de controle (👑/🎯 📊 🔄 ⏸ 🔓 ✕) em ambos os layers para garantir clique 100% confiável."""
+        """Cria os 7 botões de controle (👑/🎯 📊 🔄 ⏸ ⚡ 🔓 ✕) para clique 100% confiável."""
         def _bind_btn(btn, callback):
             def _on_press(e):
                 callback()
@@ -3114,6 +3307,15 @@ class OverlayDPSMeter:
         b_pause.pack(side=tk.LEFT)
         _bind_btn(b_pause, self.toggle_pause)
         self.btns_pause.append(b_pause)
+
+        perf_color = "#22c55e" if getattr(self, "performance_mode", False) else "#cbd5e1"
+        b_perf = tk.Label(
+            parent_frame, text="⚡", fg=perf_color, bg="#18141a",
+            font=("Segoe UI", 9), cursor="hand2", padx=3
+        )
+        b_perf.pack(side=tk.LEFT)
+        _bind_btn(b_perf, self.toggle_performance_mode)
+        self.btns_perf.append(b_perf)
 
         b_lock = tk.Label(
             parent_frame, text="🔓", fg="#cbd5e1", bg="#18141a",
@@ -3175,18 +3377,21 @@ class OverlayDPSMeter:
         self._bind_bars_canvas_events(self.bg_bars_canvas)
         self.bg_rows = [self._make_bg_row(self.bg_bars_canvas, i) for i in range(max_rows)]
 
-        # 2. LAYER 2 (Frente - root): Textos, Números, Ícones e Botões 100% Sólidos e Nítidos (canvas plano único)
-        self.monster_frame = tk.Frame(self.root, bg=TRANSPARENT_KEY, width=HUD_WIDTH, height=MONSTER_BAR_H)
+        # 2. LAYER 2 (Frente - root): Textos, Números, Ícones e Botões (ou camada única quando performance_mode=True)
+        fg_frame_bg = "#16121a" if self.performance_mode else TRANSPARENT_KEY
+        fg_bars_bg  = "#121216" if self.performance_mode else TRANSPARENT_KEY
+        self.monster_frame = tk.Frame(self.root, bg=fg_frame_bg, width=HUD_WIDTH, height=MONSTER_BAR_H)
         self.monster_frame.place(x=0, y=0, width=HUD_WIDTH, height=MONSTER_BAR_H)
         self.monster_frame.pack_propagate(False)
 
         mc = tk.Canvas(
-            self.monster_frame, bg=TRANSPARENT_KEY,
+            self.monster_frame, bg=fg_frame_bg,
             width=HUD_WIDTH, height=MONSTER_BAR_H,
             highlightthickness=0, bd=0
         )
         mc.pack(fill=tk.BOTH, expand=True)
         self.monster_canvas = mc
+        self.m_fg_bg_img    = mc.create_image(0, 0, anchor="nw", state=("normal" if self.performance_mode else "hidden"))
 
         self.m_name_txt   = mc.create_text(12, 13, text="Aguardando Alvo", anchor="w", fill="#ffffff", font=("Segoe UI", 9, "bold"))
         self.m_info_txt   = mc.create_text(HUD_WIDTH - 10, 13, text="", anchor="e", fill="#ffffff", font=("Segoe UI", 9, "bold"))
@@ -3218,7 +3423,7 @@ class OverlayDPSMeter:
         self.btn_lock  = self.btns_lock[-1]
 
         self.bars_canvas = tk.Canvas(
-            self.root, bg=TRANSPARENT_KEY,
+            self.root, bg=fg_bars_bg,
             width=HUD_WIDTH, height=bars_h,
             highlightthickness=0, bd=0
         )
@@ -3238,6 +3443,7 @@ class OverlayDPSMeter:
         cy = y0 + 15
         row_tag = f"row_{idx}"
 
+        pill_img  = c.create_image(0, y0, anchor="nw", tags=(row_tag,), state="hidden")
         rank_txt  = c.create_text(12, cy, text="", anchor="center", fill="#cbd5e1", font=("Segoe UI", 9, "bold"), tags=(row_tag,), state="hidden")
         icon_img  = c.create_image(28, cy, anchor="center", tags=(row_tag,), state="hidden")
         name_txt  = c.create_text(44, cy, text="", anchor="w", fill="#ffffff", font=("Segoe UI", 10, "bold"), tags=(row_tag,), state="hidden")
@@ -3253,7 +3459,7 @@ class OverlayDPSMeter:
 
         return {
             "idx": idx, "frame": None, "c": c, "y0": y0, "cy": cy, "tag": row_tag,
-            "pill": None, "rank": rank_txt, "img": icon_img,
+            "pill": pill_img, "rank": rank_txt, "img": icon_img,
             "name": name_txt, "cp_img": cp_img, "cp": cp_txt,
             "death_img": death_img, "death": death_txt,
             "col1": dmg_txt, "col2": dps_txt, "col3": crit_txt, "col4": share_txt,
@@ -3287,10 +3493,10 @@ class OverlayDPSMeter:
         """Atualiza barra no fundo (bg_win 60% opaco) e textos/ícones na frente (100% nítidos)."""
         idx = row.get("idx", 0)
         if pill is not row["_last_pill"]:
-            if hasattr(self, "bg_rows") and idx < len(self.bg_rows):
+            if not getattr(self, "performance_mode", False) and hasattr(self, "bg_rows") and idx < len(self.bg_rows):
                 self.bg_rows[idx]["c"].itemconfig(self.bg_rows[idx]["pill"], image=pill)
             elif row.get("pill"):
-                row["c"].itemconfig(row["pill"], image=pill)
+                row["c"].itemconfig(row["pill"], image=pill, state="normal")
             row["_last_pill"] = pill
         c = row["c"]
 
@@ -3426,14 +3632,16 @@ class OverlayDPSMeter:
         new_h = (MONSTER_BAR_H + 4) + count * (PLAYER_BAR_H + 3)
         self._cur_win_h = new_h
         self.root.geometry(f"{HUD_WIDTH}x{new_h}")
-        if getattr(self, "bg_win", None):
+        if not self.performance_mode and getattr(self, "bg_win", None):
             self.bg_win.geometry(f"{HUD_WIDTH}x{new_h}")
         try:
             self.root.update_idletasks()
-            if getattr(self, "bg_win", None):
+            if not self.performance_mode and getattr(self, "bg_win", None):
                 self.bg_win.update_idletasks()
         except Exception:
             pass
+        if self.performance_mode:
+            self._update_window_region(count)
         self._enforce_z_order()
 
     def _get_fight_duration(self):
@@ -3869,11 +4077,22 @@ class OverlayDPSMeter:
                 log(f"[UI] Erro recuperado no update_loop: {ex}")
         finally:
             if getattr(self, "root", None):
-                self.root.after(120, self.update_loop)
+                interval = min(120, max(100, min(250, int(getattr(self, "ui_refresh_ms", 160)))))
+                self.root.after(interval, self.update_loop)
 
     def _update_loop_tick(self):
         now = time.time()
         needs_redraw = False
+        prev_ui_state = (
+            getattr(self, "in_combat", False),
+            getattr(self, "combat_frozen", False),
+            getattr(self, "target_is_dead", False),
+            getattr(self, "active_target_key", None),
+            getattr(self, "current_map_id", None),
+            getattr(self, "player_identified", False),
+            getattr(self, "is_loading", False),
+            getattr(self, "view_mode", "SOLO"),
+        )
 
         # Atalho global F8 (VK_F8 = 0x77) para alternar modo Click-Through (Travar/Destravar HUD p/ Frame Gen)
         if sys.platform == "win32":
@@ -4852,11 +5071,28 @@ class OverlayDPSMeter:
         if not self.in_combat:
             flush_config_to_disk()
 
-        # Renderização Sob Demanda (On-Demand Rendering):
-        # Só redesenha o Canvas quando houve eventos relevantes na fila (needs_redraw),
-        # ou 1x por segundo se houver um timer de Enrage ativo, ou se um ícone de skill terminou de baixar!
+        # Renderização Sob Demanda com Throttle/Debounce configurável (100ms–250ms / 4–10 FPS):
+        # Transições de estado (início/fim de luta, kill/freeze, loading, troca de alvo) pintam na hora;
+        # rajadas contínuas de dano/HP são coalescidas para não sobrecarregar GDI/DWM.
         if not self.is_paused:
+            cur_ui_state = (
+                getattr(self, "in_combat", False),
+                getattr(self, "combat_frozen", False),
+                getattr(self, "target_is_dead", False),
+                getattr(self, "active_target_key", None),
+                getattr(self, "current_map_id", None),
+                getattr(self, "player_identified", False),
+                getattr(self, "is_loading", False),
+                getattr(self, "view_mode", "SOLO"),
+            )
+            force_redraw = (cur_ui_state != prev_ui_state)
             if needs_redraw:
+                self._ui_dirty = True
+            min_dt = max(0.10, min(0.25, getattr(self, "ui_refresh_ms", 160) / 1000.0))
+            last_paint = getattr(self, "_last_ui_paint_t", 0.0)
+            if force_redraw or (getattr(self, "_ui_dirty", False) and (now - last_paint >= min_dt)):
+                self._ui_dirty = False
+                self._last_ui_paint_t = now
                 if self.in_combat and self.combat_start:
                     dur = self._get_fight_duration()
                     self._update_target_label(is_dead=self.target_is_dead, dur=dur)
@@ -5046,10 +5282,15 @@ class OverlayDPSMeter:
                     self.monster_canvas.itemconfig(self.m_name_txt, text=disp_name)
             self._m_last_name = disp_name
 
-        m_pill = self.pill_renderer.get_monster_pill(ratio if not is_dead else 0.0)
+        perf_mode = bool(getattr(self, "performance_mode", False))
+        m_pill = self.pill_renderer.get_monster_pill(ratio if not is_dead else 0.0, solid_bg=perf_mode)
         if m_pill is not self._m_last_pill:
-            target_mc = self.bg_monster_canvas if getattr(self, "bg_monster_canvas", None) else self.monster_canvas
-            target_mc.itemconfig(self.m_bg_img, image=m_pill)
+            if perf_mode and hasattr(self, "m_fg_bg_img"):
+                self.monster_canvas.itemconfig(self.m_fg_bg_img, image=m_pill, state="normal")
+            elif getattr(self, "bg_monster_canvas", None) is not None and hasattr(self, "m_bg_img"):
+                self.bg_monster_canvas.itemconfig(self.m_bg_img, image=m_pill)
+            elif hasattr(self, "m_bg_img"):
+                self.monster_canvas.itemconfig(self.m_bg_img, image=m_pill)
             self._m_last_pill = m_pill
 
     def render_hud(self, dur):
@@ -5240,9 +5481,17 @@ class OverlayDPSMeter:
         sys.exit(0)
 
 def main():
+    import argparse
     check_or_request_admin()
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--performance", "--no-gpu-composite", "--no-transparent", action="store_true", dest="performance_mode")
+    parser.add_argument("--transparent", action="store_false", dest="performance_mode")
+    parser.add_argument("--ui-ms", type=int, default=None, dest="ui_refresh_ms")
+    parser.set_defaults(performance_mode=None)
+    args, _ = parser.parse_known_args()
+
     root = tk.Tk()
-    OverlayDPSMeter(root)
+    OverlayDPSMeter(root, performance_mode=args.performance_mode, ui_refresh_ms=args.ui_refresh_ms)
     root.mainloop()
 
 if __name__ == "__main__":
