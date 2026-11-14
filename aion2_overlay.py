@@ -20,7 +20,7 @@ import socket
 import re
 import urllib.request
 from functools import lru_cache
-from collections import OrderedDict
+from collections import OrderedDict, deque
 import lz4.block
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
@@ -2135,11 +2135,27 @@ class SnifferThread(threading.Thread):
 
     def stop(self):
         self.running = False
-        if self.proc:
+        p = self.proc
+        self.proc = None
+        if p:
             try:
-                self.proc.terminate()
+                p.terminate()
             except Exception:
                 pass
+            try:
+                p.wait(timeout=0.5)
+            except Exception:
+                try:
+                    p.kill()
+                    p.wait(timeout=0.3)
+                except Exception:
+                    pass
+            for pipe in (getattr(p, "stdout", None), getattr(p, "stderr", None)):
+                if pipe:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
 
 # ─────────────────────────────────────────────
 # RENDERIZADOR DE BARRAS FLUTUANTES OTIMIZADO (PRÉ-ALOCADO + CACHE LRU)
@@ -2740,11 +2756,15 @@ if sys.platform == "win32":
             return 3
         if msg == 0x0082:  # WM_NCDESTROY
             _DCOMP_INSTANCES.pop(hwnd, None)
+            return _win32_user.DefWindowProcW(hwnd, msg, wparam, lparam)
         surf = _DCOMP_INSTANCES.get(hwnd)
         if surf is not None:
-            res = surf._handle_msg(hwnd, msg, wparam, lparam)
-            if res is not None:
-                return res
+            try:
+                res = surf._handle_msg(hwnd, msg, wparam, lparam)
+                if res is not None:
+                    return res
+            except Exception:
+                pass
         return _win32_user.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     _DCOMP_WNDPROC_CB = _DCOMP_WNDPROC_TYPE(_dcomp_wndproc_dispatch)
@@ -2910,7 +2930,7 @@ class DCompOverlaySurface:
     def set_position(self, x, y, topmost=True):
         if not self.hwnd:
             return
-        flags = 0x0001 | 0x0010 | (0x0000 if topmost else 0x0004)  # SWP_NOSIZE | SWP_NOACTIVATE
+        flags = 0x0001 | 0x0010 | 0x0400 | (0x0000 if topmost else 0x0004)  # SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOSENDCHANGING
         z = wintypes.HWND(-1) if topmost else None
         _win32_user.SetWindowPos(self.hwnd, z, int(x), int(y), 0, 0, flags)
 
@@ -2947,7 +2967,8 @@ class DCompOverlaySurface:
         if hr_buf < 0 or not tex.value:
             return False
         try:
-            buf_ptr = ctypes.cast(ctypes.c_char_p(bgra_bytes), ctypes.c_void_p)
+            c_buf = ctypes.c_char_p(bgra_bytes)
+            buf_ptr = ctypes.cast(c_buf, ctypes.c_void_p)
             _com_call(
                 self._d3d_ctx, 48, None,
                 (ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT, wintypes.UINT),
@@ -2970,9 +2991,18 @@ class DCompOverlaySurface:
         _win32_user.SetWindowPos(self.hwnd, None, 0, 0, 0, 0, 0x0037)
 
     def _handle_msg(self, hwnd, msg, wparam, lparam):
+        # IMPORTANTE: NUNCA chamar métodos Tkinter/Tcl (root.after, etc.) aqui dentro!
+        # Em Python/Tkinter no Windows, DispatchMessageW executa dentro de Py_BEGIN_ALLOW_THREADS;
+        # chamar Tkapp_Call dentro de um callback WNDPROC corrompe a pilha GIL (Fatal Python error: PyEval_RestoreThread).
         owner = self.owner
         if owner is None:
             return None
+        if msg == 0x0010:  # WM_CLOSE
+            owner._queue_dcomp_command("btn", "close")
+            return 0
+        if msg == 0x0215:  # WM_CAPTURECHANGED
+            self._dragging = False
+            return 0
         if msg == 0x0201:  # WM_LBUTTONDOWN
             if getattr(owner, "is_click_through", False) and not getattr(owner, "is_hovered", False):
                 return 0
@@ -2981,7 +3011,7 @@ class DCompOverlaySurface:
             if getattr(owner, "is_hovered", False) and ly <= MONSTER_BAR_H + 2:
                 for x0, y0, x1, y1, action in getattr(owner, "_dcomp_button_rects", ()):
                     if x0 <= lx <= x1 and y0 <= ly <= y1:
-                        owner.root.after(0, lambda act=action: owner._on_dcomp_button(act))
+                        owner._queue_dcomp_command("btn", action)
                         return 0
             pt = _Win32Point()
             _win32_user.GetCursorPos(ctypes.byref(pt))
@@ -2992,7 +3022,7 @@ class DCompOverlaySurface:
             self._drag_dx = pt.x - getattr(owner, "_cur_win_x", 80)
             self._drag_dy = pt.y - getattr(owner, "_cur_win_y", 80)
             _win32_user.SetCapture(hwnd)
-            owner._enforce_z_order()
+            owner._queue_dcomp_command("z_order", None)
             return 0
 
         if msg == 0x0200:  # WM_MOUSEMOVE
@@ -3004,6 +3034,8 @@ class DCompOverlaySurface:
                 owner._cur_win_x = nx
                 owner._cur_win_y = ny
                 self.set_position(nx, ny, topmost=True)
+            elif not getattr(owner, "is_hovered", False):
+                owner._queue_dcomp_command("sync_hover", None)
             return 0
 
         if msg == 0x0202:  # WM_LBUTTONUP
@@ -3012,11 +3044,11 @@ class DCompOverlaySurface:
                 _win32_user.ReleaseCapture()
                 pt = _Win32Point()
                 _win32_user.GetCursorPos(ctypes.byref(pt))
-                owner._enforce_z_order()
+                owner._queue_dcomp_command("z_order", None)
                 if not getattr(owner, "is_click_through", False):
                     if abs(pt.x - self._press_px) < 5 and abs(pt.y - self._press_py) < 5:
                         if self._press_ly >= MONSTER_BAR_H + 4:
-                            owner.root.after(0, owner.toggle_mode)
+                            owner._queue_dcomp_command("btn", "mode")
             return 0
 
         if msg == 0x0205:  # WM_RBUTTONUP
@@ -3024,10 +3056,10 @@ class DCompOverlaySurface:
                 return 0
             ly = ctypes.c_short((lparam >> 16) & 0xFFFF).value
             if ly <= MONSTER_BAR_H + 2:
-                owner.root.after(0, owner.edit_player_name)
+                owner._queue_dcomp_command("edit_target", None)
             else:
                 row_idx = max(0, min(max(0, getattr(owner, "visible_rows", 1) - 1), int((ly - (MONSTER_BAR_H + 4)) // (PLAYER_BAR_H + 3))))
-                owner.root.after(0, lambda r=row_idx: owner.edit_row_player(r))
+                owner._queue_dcomp_command("edit_row", row_idx)
             return 0
 
         return None
@@ -3109,11 +3141,14 @@ class OverlayDPSMeter:
             self.ui_refresh_ms = 160
         self._ui_dirty        = False
         self._last_ui_paint_t = 0.0
+        self._closing         = False
         self._dcomp           = None
         self._dcomp_fonts     = _DCompFontSet() if sys.platform == "win32" else None
         self._dcomp_monster   = {}
         self._dcomp_rows      = [{} for _ in range(6)]
         self._dcomp_button_rects = []
+        self._dcomp_cmd_queue = deque()
+        self._dcomp_poll_pending = False
         self._dcomp_dirty     = False
         self._dcomp_last_sig  = None
 
@@ -3286,10 +3321,58 @@ class OverlayDPSMeter:
             self._dcomp = DCompOverlaySurface(self, wx, wy, HUD_WIDTH, wh)
             self._dcomp_dirty = True
             self._dcomp_last_sig = None
+            self._schedule_dcomp_poll()
             return True
         except Exception:
             self._dcomp = None
             return False
+
+    def _queue_dcomp_command(self, kind, arg=None):
+        """Enfileira eventos Win32 do HWND DComp de forma pura em Python (sem tocar Tkinter no WNDPROC)."""
+        q = getattr(self, "_dcomp_cmd_queue", None)
+        if q is not None:
+            q.append((kind, arg))
+
+    def _drain_dcomp_commands(self):
+        """Executa na thread Tkinter segura todos os cliques/ações vindos do WNDPROC DComp."""
+        q = getattr(self, "_dcomp_cmd_queue", None)
+        if not q:
+            return False
+        processed = False
+        while q:
+            if getattr(self, "_closing", False):
+                q.clear()
+                break
+            kind, arg = q.popleft()
+            processed = True
+            if kind == "btn":
+                self._on_dcomp_button(arg)
+            elif kind == "sync_hover":
+                self._sync_hover_and_click_through()
+            elif kind == "z_order":
+                self._enforce_z_order()
+            elif kind == "edit_target":
+                self.edit_player_name()
+            elif kind == "edit_row":
+                self.edit_row_player(arg)
+        return processed
+
+    def _schedule_dcomp_poll(self):
+        if getattr(self, "_closing", False) or getattr(self, "_dcomp_poll_pending", False):
+            return
+        if self._is_dcomp_active() and getattr(self, "root", None):
+            try:
+                self._dcomp_poll_pending = True
+                self.root.after(20, self._poll_dcomp_commands)
+            except Exception:
+                self._dcomp_poll_pending = False
+
+    def _poll_dcomp_commands(self):
+        self._dcomp_poll_pending = False
+        if getattr(self, "_closing", False):
+            return
+        self._drain_dcomp_commands()
+        self._schedule_dcomp_poll()
 
     def _destroy_dcomp_surface(self):
         dc = getattr(self, "_dcomp", None)
@@ -4889,11 +4972,16 @@ class OverlayDPSMeter:
                 self._last_loop_err_t = now_err
                 log(f"[UI] Erro recuperado no update_loop: {ex}")
         finally:
-            if getattr(self, "root", None):
+            if getattr(self, "root", None) and not getattr(self, "_closing", False):
                 interval = min(120, max(100, min(250, int(getattr(self, "ui_refresh_ms", 160)))))
                 self.root.after(interval, self.update_loop)
 
     def _update_loop_tick(self):
+        if getattr(self, "_closing", False):
+            return
+        self._drain_dcomp_commands()
+        if getattr(self, "_closing", False):
+            return
         now = time.time()
         needs_redraw = False
         prev_ui_state = (
@@ -6380,23 +6468,25 @@ class OverlayDPSMeter:
             self._flush_dcomp_if_dirty()
 
     def on_close(self):
+        if getattr(self, "_closing", False):
+            return
+        self._closing = True
+        q = getattr(self, "_dcomp_cmd_queue", None)
+        if q is not None:
+            q.clear()
         flush_config_to_disk(force=True)
         self.sniffer.stop()
         if hasattr(self, "_destroy_dcomp_surface"):
             self._destroy_dcomp_surface()
-        if hasattr(self, "bg_win") and self.bg_win:
-            try:
-                self.bg_win.destroy()
-            except Exception:
-                pass
-        try:
-            self.root.destroy()
-        except Exception:
-            pass
-        try:
-            self.taskbar_win.destroy()
-        except Exception:
-            pass
+        for attr in ("bg_win", "root", "taskbar_win"):
+            win = getattr(self, attr, None)
+            if win is not None:
+                try:
+                    if attr == "taskbar_win":
+                        win.quit()
+                    win.destroy()
+                except Exception:
+                    pass
         sys.exit(0)
 
 def parse_cli_args(argv=None):
