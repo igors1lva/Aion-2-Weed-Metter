@@ -5,6 +5,10 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/igors1lva/Aion-2-Weed-Metter/releases/latest"><img src="https://img.shields.io/github/v/release/igors1lva/Aion-2-Weed-Metter?color=10b981&label=Download&logo=github" alt="Download"></a>
+</p>
+
+<p align="center">
   <img src="assets/preview.jpg" alt="Aparência do WeedDPSMetter no Aion 2">
 </p>
 
@@ -19,6 +23,17 @@
 - **Leve e discreto:** Overlay transparente com aceleração via DirectComposition para rodar por cima do jogo sem pesar no FPS.
 - **Trava Click-Through (`F8` / `🔒`):** Trava o medidor para você clicar normalmente no jogo através dele.
 - **Reset automático:** Zera os dados anteriores automaticamente ao entrar ou sair de dungeons, trocar de mapa ou trocar de personagem.
+
+---
+
+## 🚀 Instalação (Baixou, executou, pronto!)
+
+1. Caso ainda não tenha no PC, instale os dois requisitos do Windows:
+   - **[Npcap](https://npcap.com/#download)** *(marque "Install Npcap in WinPcap API-compatible Mode")*
+   - **[Wireshark](https://www.wireshark.org/)** *(instalação padrão)*
+2. Baixe o `.zip` mais recente em **[Releases](https://github.com/igors1lva/Aion-2-Weed-Metter/releases/latest)**.
+3. Extraia o arquivo e execute **`Aion2_Weed_Metter.exe`**.
+4. Com o jogo aberto, basta **teleportar para algum Kisk ou ir para a tela de seleção de personagem** — pronto, o medidor identifica você automaticamente!
 
 ---
 
@@ -37,38 +52,6 @@ Passe o mouse sobre a barra superior para exibir os botões:
 | **`⏸` / `▶`** | Pausa ou retoma a leitura |
 | **`⚡`** | Alterna entre renderização DirectComposition e modo clássico |
 | **`✕`** | Fecha o medidor |
-
----
-
-## 🚀 Como Usar (Windows)
-
-### Pré-requisitos
-- **[Npcap](https://npcap.com/#download)** instalado *(marque a opção "Install Npcap in WinPcap API-compatible Mode")*
-- **[Wireshark](https://www.wireshark.org/)** instalado no caminho padrão (`C:\Program Files\Wireshark\tshark.exe`)
-- **Python 3.10+** *(caso rode pelo código-fonte)*
-
-### Executando pelo código-fonte
-
-```bash
-git clone https://github.com/igors1lva/Aion-2-Weed-Metter.git
-cd Aion-2-Weed-Metter
-pip install -r requirements.txt
-```
-
-Abra o terminal **como Administrador** e execute:
-
-```bash
-python aion2_overlay.py
-```
-
-### Gerando o executável `.exe` (opcional)
-
-```bash
-pip install pyinstaller
-pyinstaller Aion2_DPS_Meter.spec --noconfirm
-```
-
-O arquivo compilado será gerado em `dist/Aion2_Weed_Metter.exe`.
 
 ---
 
